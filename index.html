@@ -197,7 +197,7 @@ async function think(system, turns, maxTokens = 1200) {
     body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] },
       contents: turns.map((t) => ({ role: t.role === "assistant" ? "model" : "user", parts: [{ text: t.content }] })),
       generationConfig: { maxOutputTokens: maxTokens, responseMimeType: "application/json" } }) });
-  if (!r.ok) throw new Error("api " + r.status + " " + (await r.text()).slice(0, 200));
+  if (!r.ok) throw new Error("api " + r.status + " " + (await r.text()).slice(0, 2000));
   const j = await r.json();
   return (j.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
 }
@@ -242,7 +242,9 @@ async function send(text) {
     if (mind.since >= 12) reflect(true);
   } catch (e) {
     b.remove(); busy = false; mood();
-    sys(String(e.message).startsWith("api 4") ? "My key was refused. Check it in Setup." : "I couldn't reach my brain - check your signal and try again.");
+    const msg = String(e.message || "");
+    let why = ""; try { why = JSON.parse(msg.replace(/^api \d+ /, "")).error.message; } catch { why = msg.slice(0, 160); }
+    sys(msg === "nokey" ? "I need a key: open Setup." : msg.startsWith("api 4") ? `My key was refused. Google says: ${why}` : "I couldn't reach my brain - check your signal and try again.");
     stopHands();
   }
 }
@@ -349,7 +351,12 @@ const HELP = { gemini: "Free: go to aistudio.google.com/apikey, sign in with Goo
   claude: "Best quality: console.anthropic.com → API keys. Costs pennies per conversation." };
 $("brain").value = settings.brain || "gemini"; $("key").value = settings.key || "";
 const help = () => $("keyHelp").textContent = HELP[$("brain").value]; $("brain").onchange = help; help();
-$("saveKey").onclick = () => { settings = { brain: $("brain").value, key: $("key").value.trim() }; try { localStorage.setItem("dan2_settings", JSON.stringify(settings)); } catch {} $("keyNote").textContent = settings.key ? "Saved. Go to Talk." : "Key removed."; };
+function cleanKey(raw) {
+  raw = (raw || "").trim();
+  const m = raw.match(/\b(AQ\.[A-Za-z0-9_\-.]+|AIza[A-Za-z0-9_\-]+|sk-ant-[A-Za-z0-9_\-]+)/);
+  return m ? m[1] : raw.replace(/^['"]|['"]$/g, "");
+}
+$("saveKey").onclick = () => { $("key").value = cleanKey($("key").value); settings = { brain: $("brain").value, key: $("key").value }; try { localStorage.setItem("dan2_settings", JSON.stringify(settings)); } catch {} $("keyNote").textContent = settings.key ? "Saved. Go to Talk." : "Key removed."; };
 $("exportMem").onclick = async () => {
   const t = "Dan 2.0, save each of these facts from Pocket Dan to your memory:\n" + mind.facts.map((f) => `- (${f.category}) ${f.fact}`).join("\n");
   try { await navigator.clipboard.writeText(t); $("linkNote").textContent = `Copied ${mind.facts.length} memories.`; } catch { $("importBox").hidden = false; $("importBox").value = t; $("importBox").select(); $("linkNote").textContent = "Copy it from the box."; }
