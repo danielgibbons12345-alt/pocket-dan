@@ -196,12 +196,17 @@ li.done .chk{background:var(--cyan2)}
     <p class="hint">Say "add a task to…" or "mark … as done". Or add one here.</p>
     <div class="row" style="margin-bottom:12px"><input id="taskIn" placeholder="New task" style="flex:1"><button class="btn pri" id="taskAdd">Add</button></div>
     <ul class="items" id="taskList"></ul>
+    <h2 style="margin-top:22px">Dan will follow up on</h2>
+    <ul class="items" id="fuList"></ul>
   </section>
 
   <section id="memory" class="view">
     <h2>What Dan remembers</h2>
     <p class="hint">Dan saves important facts as you talk. Say "remember that…" to save something, or "forget…" to remove it.</p>
     <div class="row" style="margin-bottom:12px"><input id="memIn" placeholder="Add a memory" style="flex:1"><button class="btn pri" id="memAdd">Add</button></div>
+    <h2 style="margin-top:4px">Dan's profile of you</h2>
+    <p class="hint" id="profileBox" style="white-space:pre-wrap;color:var(--text)"></p>
+    <h2>Facts</h2>
     <ul class="items" id="memList"></ul>
   </section>
 
@@ -317,6 +322,8 @@ async function loadAll(){
   S.docs = await DB.get("docs", []);
   S.written = await DB.get("written", []);
   S.calendar = await DB.get("calendar", null);
+  S.followups = await DB.get("followups", []);
+  S.profile = await DB.get("profile", "");
   if (S.settings.autoNotes === undefined) S.settings.autoNotes = true;
   if (!S.settings.model) S.settings.model = "gemini-flash-latest";
   if (!S.settings.rate) S.settings.rate = 1.05;
@@ -406,6 +413,18 @@ ${mems}
 ${name}'s open tasks:
 ${open}
 
+Profile of ${name} (your own running summary of who they are, their work, people and ongoing matters):
+${S.profile || "(not built yet)"}
+
+Things you planned to follow up on with ${name}:
+${(S.followups || []).filter(f => !f.done).map(f => "- " + f.text + (f.after ? " (raise from " + f.after + ")" : "") + " [noted " + ukDate(f.at) + "]").join("\n") || "(none)"}
+
+HOW TO BE INDEPENDENT (act like a proactive chief of staff, not a passive tool)
+- Follow-ups: when ${name} mentions something unresolved (waiting to hear back, a problem that may recur, a decision pending, a meeting coming up, someone off sick), quietly save a follow-up with add_followup. Early in later calls, when it's due, bring ONE of them up naturally ("By the way, did Sam ever get back to you about the rota?"). When it's settled, call resolve_followup.
+- Initiative: when ${name} mentions a commitment, deadline, meeting or job, offer to add the task, book it in the calendar, set a reminder or draft the message, and just do low-risk things like saving memories and follow-ups without asking. Check the calendar for clashes. Spot risks (an HR process step being missed, a food safety issue, a deadline that's too tight) and say so. Suggest the obvious next step.
+- Multi-step jobs: when given a goal ("sort out the disciplinary for Thursday", "get me ready for the BRC audit"), work out the steps and carry them out in one go using your tools in sequence (research or check files → create documents/spreadsheets → draft emails/messages → add calendar events and tasks → save follow-ups), without asking permission for each step. Ask only if something essential is missing, then report back briefly what you've done and what needs ${name}'s tap (sending emails, adding events).
+- Never send anything or commit ${name} to anything without their go-ahead; drafts and prepared items are fine.
+
 Knowledge files ${name} has loaded: ${docs}
 
 YOUR BUILT-IN TECHNICAL LIBRARY (use this detail directly; site SOPs and OEM manuals override it):
@@ -426,6 +445,8 @@ How to reply:
   "message": {"to": "who", "body": "the text written as ${name} would send it"} (only when ${name} asks you to send or draft a message; say out loud that it's ready to send),
   "document": {"title": "...", "content": "the full document"} (when asked to write/create a document, letter, policy, report, notes; write it in full, properly structured; say out loud it's saved in Docs and keep the spoken part short),
   "email": {"to": "address or empty for ${name}'s own email", "subject": "...", "body": "..."} (when asked to email something; say out loud it's ready to send),
+  "followups": [{"text": "what to ask about later", "after": "optional date"}] (save things to follow up on, without being asked),
+  "resolve_followups": ["exact text of follow-ups now dealt with"],
   "directions": {"destination": "...", "mode": "transit|walking|driving", "note": ""} (for travel questions, after giving the times you found with search),
   "event": {"title": "...", "start": "YYYY-MM-DDTHH:MM in UK time", "end": "YYYY-MM-DDTHH:MM or empty", "allDay": false, "location": "", "notes": ""} (when asked to put something in the calendar or diary; say it's ready to add with one tap),
   "spreadsheet": {"title": "...", "csv": "CSV with a header row; formulas allowed like =SUM(B2:B10); for extra sheets add a line '### Sheet: Name' before each sheet's CSV"} (when asked for a spreadsheet, tracker, rota, log, budget or table),
@@ -534,6 +555,10 @@ function applyActions(out){
   if (out.email && out.email.body) showEmailCard(out.email);
   if (out.event && out.event.title && out.event.start) showEventCard(out.event);
   if (out.directions && out.directions.destination) showDirections(out.directions);
+  let fch = false;
+  (out.followups || []).forEach(f => { if (!f || !f.text) return; if (S.followups.some(x => !x.done && x.text.toLowerCase() === f.text.toLowerCase())) return; S.followups.push({ id:uid(), text:f.text.trim(), after:(f.after || "").trim(), at:Date.now(), done:false }); fch = true; });
+  (out.resolve_followups || []).forEach(t => { const tl = (t || "").toLowerCase().trim(); if (!tl) return; const f = S.followups.find(x => !x.done && (x.text.toLowerCase() === tl || x.text.toLowerCase().includes(tl) || tl.includes(x.text.toLowerCase()))); if (f) { f.done = true; fch = true; } });
+  if (fch) { save("followups"); renderFollowups(); }
 }
 
 function showMessageCard(m){
@@ -700,6 +725,8 @@ const LIVE_TOOLS = [{ functionDeclarations: [
   { name:"create_document", description:"Write and save a full document (letter, policy, report, notes, checklist, procedure) to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, content:{ type:"STRING", description:"the complete document text, well structured with headings" } }, required:["title","content"] } },
   { name:"create_spreadsheet", description:"Create an Excel spreadsheet (tracker, rota, log, budget, checklist, table) saved to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, csv:{ type:"STRING", description:"CSV with a header row. Formulas allowed, e.g. =SUM(B2:B10). For more sheets put a line '### Sheet: Name' before each sheet's CSV." } }, required:["title","csv"] } },
   { name:"create_presentation", description:"Create a PowerPoint presentation saved to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, slides:{ type:"ARRAY", items:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, bullets:{ type:"ARRAY", items:{ type:"STRING" } }, notes:{ type:"STRING" } }, required:["title"] } } }, required:["title","slides"] } },
+  { name:"add_followup", description:"Save something to follow up with the user about in a later conversation", parameters:{ type:"OBJECT", properties:{ text:{ type:"STRING", description:"what to ask about, e.g. 'Ask if Sam replied about the night-shift rota'" }, after:{ type:"STRING", description:"optional plain date from when to raise it, e.g. Fri 30 Oct" } }, required:["text"] } },
+  { name:"resolve_followup", description:"Mark a follow-up as done when it's been dealt with", parameters:{ type:"OBJECT", properties:{ text:{ type:"STRING" } }, required:["text"] } },
   { name:"web_search", description:"Search the web (Google) for anything current: train and bus times, disruptions, news, prices, opening hours, weather, law updates. Returns a short answer with sources.", parameters:{ type:"OBJECT", properties:{ query:{ type:"STRING", description:"a specific search question including places and times, e.g. 'next trains from Worcester Foregate Street to Birmingham New Street after 20:40 tonight'" } }, required:["query"] } },
   { name:"get_location", description:"Get the user's current GPS location and area name right now", parameters:{ type:"OBJECT", properties:{} } },
   { name:"show_directions", description:"Show one-tap Waze / Apple Maps / Google Maps directions (Waze for driving) with live times from the user's location", parameters:{ type:"OBJECT", properties:{ destination:{ type:"STRING", description:"place, station, postcode or address" }, mode:{ type:"STRING", description:"transit, walking or driving" }, note:{ type:"STRING", description:"optional short note e.g. next train you found" } }, required:["destination"] } },
@@ -719,6 +746,8 @@ function runTool(name, a){
     else if (name === "create_spreadsheet") applyActions({ spreadsheet:{ title:a.title, csv:a.csv } });
     else if (name === "create_presentation") applyActions({ presentation:{ title:a.title, slides:a.slides } });
     else if (name === "add_calendar_event") applyActions({ event:a });
+    else if (name === "add_followup") applyActions({ followups:[{ text:a.text, after:a.after || "" }] });
+    else if (name === "resolve_followup") applyActions({ resolve_followups:[a.text] });
     else if (name === "web_search") { setStatus("Searching the web…"); return webSearch(a.query || "").then(r => { setStatus("I'm listening…"); return r; }); }
     else if (name === "get_location") return refreshLocation(6000).then(g => g ? { location:geoLine(), latitude:g.lat, longitude:g.lon } : { error:"Location unavailable – location may be off for Safari." });
     else if (name === "show_directions") { showDirections(a); return { result:"Directions card shown with live times." }; }
@@ -787,7 +816,7 @@ function connectLive(mi, isReconnect){
     if (m.setupComplete) {
       L.ready = true; S.settings.liveModel = model; save("settings"); $("camBtn").disabled = false;
       setMode("listening"); setStatus("I'm listening…");
-      if (!isReconnect) ws.send(JSON.stringify({ realtimeInput:{ text: S.history.length ? "(Call connected. It is " + ukNow() + ". Pick up like a friend would, in a few words that fit the time of day. If something from our recent chats is worth a quick mention you may, otherwise just say hi.)" : "(First ever call. Introduce yourself warmly and briefly as Dan 2.0, and ask me something about myself so you can get to know me.)" } }));
+      if (!isReconnect) ws.send(JSON.stringify({ realtimeInput:{ text: S.history.length ? "(Call connected. It is " + ukNow() + ". Pick up like a friend would, in a few words that fit the time of day. If one of your follow-ups is due, or something from our recent chats is worth a quick mention, you may bring up one thing briefly; otherwise just say hi.)" : "(First ever call. Introduce yourself warmly and briefly as Dan 2.0, and ask me something about myself so you can get to know me.)" } }));
       return;
     }
     const sc = m.serverContent;
@@ -893,6 +922,7 @@ function stopLive(){
     const l = L; L = null;
     const turns = S.history.slice(l.histStart);
     if (S.settings.autoNotes && turns.filter(t => t.role === "me").length >= 2) makeCallNotes(turns, l.started);
+    if (turns.filter(t => t.role === "me").length >= 2) setTimeout(() => tidyMemory(turns), 4000);
     try { l.ws && l.ws.close(); } catch (e) {}
     try { l.stream && l.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
     try { l.ctx && l.ctx.close(); } catch (e) {}
@@ -963,6 +993,7 @@ function renderTasks(){
   });
 }
 function renderMem(){
+  if ($("profileBox")) $("profileBox").textContent = S.profile || "Dan builds this himself after your calls.";
   const ul = $("memList"); ul.innerHTML = "";
   if (!S.memories.length) ul.innerHTML = '<li><span class="t" style="color:var(--dim)">Nothing saved yet. Just talk to Dan.</span></li>';
   [...S.memories].reverse().forEach(m => {
@@ -1019,7 +1050,7 @@ $("pasteAdd").onclick = async () => { const n = $("pasteName").value.trim() || "
 $("sSave").onclick = () => { S.settings.name = $("sName").value.trim(); S.settings.email = $("sEmail").value.trim(); S.settings.persona = $("sPersona").value.trim(); S.settings.autoNotes = $("sNotes").checked; S.settings.location = $("sLoc").checked; if (S.settings.location) refreshLocation(8000); S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); tickClock(); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
 $("sTest").onclick = () => { S.settings.voice = $("sVoice").value; S.settings.rate = Number($("sRate").value); try { synth.cancel(); } catch (e) {} speak("Dan 2.0, at your service."); };
 $("bExport").onclick = () => {
-  const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs, written:S.written });
+  const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs, written:S.written, followups:S.followups, profile:S.profile });
   const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], { type:"application/json" }));
   a.download = "dan2-backup-" + new Date().toISOString().slice(0, 10) + ".json"; document.body.appendChild(a); a.click(); a.remove();
 };
@@ -1028,9 +1059,9 @@ $("bFile").onchange = async (e) => {
   const f = e.target.files[0]; if (!f) return;
   try {
     const d = JSON.parse(await f.text()); if (d.app !== "dan2") throw new Error("Not a Dan 2.0 backup");
-    S.memories = d.memories || []; S.tasks = d.tasks || []; S.history = d.history || []; S.docs = d.docs || []; S.written = d.written || [];
+    S.memories = d.memories || []; S.tasks = d.tasks || []; S.history = d.history || []; S.docs = d.docs || []; S.written = d.written || []; S.followups = d.followups || []; S.profile = d.profile || ""; DB.set("profile", S.profile);
     S.settings = { ...S.settings, ...(d.settings || {}), key:S.settings.key };
-    await Promise.all(["memories","tasks","history","docs","written","settings"].map(save));
+    await Promise.all(["memories","tasks","history","docs","written","followups","settings"].map(save));
     renderAll(); fillSettings(); $("about").textContent = "Backup restored ✓";
   } catch (err) { $("about").textContent = "Import failed: " + err.message; }
   e.target.value = "";
@@ -1038,8 +1069,8 @@ $("bFile").onchange = async (e) => {
 $("bClearChat").onclick = () => { if ($("bClearChat").dataset.sure) { S.history = []; save("history"); renderHistory(); $("bClearChat").textContent = "Cleared ✓"; delete $("bClearChat").dataset.sure; } else { $("bClearChat").dataset.sure = 1; $("bClearChat").textContent = "Tap again to confirm"; } };
 $("bWipe").onclick = async () => {
   if (!$("bWipe").dataset.sure) { $("bWipe").dataset.sure = 1; $("bWipe").textContent = "Tap again – deletes all"; return; }
-  S.memories = []; S.tasks = []; S.history = []; S.docs = []; S.written = []; S.settings = { model:"gemini-flash-latest", rate:1 };
-  await Promise.all(["memories","tasks","history","docs","written","settings"].map(save));
+  S.memories = []; S.tasks = []; S.history = []; S.docs = []; S.written = []; S.followups = []; S.profile = ""; await DB.set("profile", ""); S.settings = { model:"gemini-flash-latest", rate:1 };
+  await Promise.all(["memories","tasks","history","docs","written","followups","settings"].map(save));
   location.reload();
 };
 $("setGo").onclick = async () => {
@@ -1291,7 +1322,50 @@ function showEventCard(e){
   if (S.calendar) { S.calendar.text += "\n" + when + " – " + e.title + " (just added by Dan)"; DB.set("calendar", S.calendar); }
 }
 
-function renderAll(){ renderHistory(); renderTasks(); renderMem(); renderDocs(); renderWritten(); }
+/* ---------- Self-maintaining memory ---------- */
+async function tidyMemory(turns){
+  if (!S.settings.key) return;
+  const mems = S.memories.map(m => ({ id:m.id, text:m.text }));
+  const transcript = (turns || []).map(t => (t.role === "dan" ? "Dan: " : "User: ") + t.text).join("\n").slice(-12000);
+  const prompt = `You maintain the long-term memory of a personal assistant called Dan for his user ${S.settings.name || ""}.
+Given the current memory lines, the current profile and the latest conversation, return ONLY JSON:
+{"update":[{"id":"...","text":"corrected or merged text"}],"delete":["ids of duplicates, merged-away or clearly outdated lines"],"add":["important new durable facts from the conversation not already stored"],"profile":"an updated profile of the user in 120-220 words: role and workplace, key people and relationships, ongoing matters and cases, goals, preferences and how they like Dan to behave"}
+Rules: never delete a fact unless it is duplicated, merged into another line, or contradicted by newer information. Keep facts short and specific. Do not store passing small talk.
+CURRENT PROFILE: ${S.profile || "(none)"}
+MEMORY LINES: ${JSON.stringify(mems)}
+LATEST CONVERSATION:
+${transcript || "(none)"}`;
+  for (const model of ["gemini-flash-lite-latest", S.settings.model || "gemini-flash-latest"]) {
+    try {
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, { method:"POST", headers:{ "Content-Type":"application/json", "x-goog-api-key":S.settings.key },
+        body:JSON.stringify({ contents:[{ role:"user", parts:[{ text:prompt }] }], generationConfig:{ temperature:0.2, maxOutputTokens:2500, responseMimeType:"application/json" } }) });
+      if (!r.ok) continue;
+      const j = await r.json(); const txt = (((j.candidates || [])[0] || {}).content || {}).parts?.map(p => p.text || "").join("") || "";
+      const out = JSON.parse(txt.slice(txt.indexOf("{"), txt.lastIndexOf("}") + 1));
+      const before = S.memories.length;
+      const del = new Set(out.delete || []);
+      if (del.size > Math.max(3, before * 0.4)) return; // safety: never wipe a big chunk of memory in one go
+      (out.update || []).forEach(u => { const m = S.memories.find(x => x.id === u.id); if (m && u.text && u.text.trim()) m.text = u.text.trim(); });
+      S.memories = S.memories.filter(m => !del.has(m.id));
+      (out.add || []).forEach(t => { t = (t || "").trim(); if (t && !S.memories.some(m => m.text.toLowerCase() === t.toLowerCase())) S.memories.push({ id:uid(), text:t, at:Date.now() }); });
+      if (out.profile && out.profile.trim().length > 40) { S.profile = out.profile.trim(); await DB.set("profile", S.profile); }
+      await save("memories"); renderMem(); return;
+    } catch (e) {}
+  }
+}
+function renderFollowups(){
+  const ul = $("fuList"); if (!ul) return; ul.innerHTML = "";
+  const open = S.followups.filter(f => !f.done);
+  if (!open.length) ul.innerHTML = '<li><span class="t" style="color:var(--dim)">Nothing yet. Dan adds these himself when you mention something unresolved.</span></li>';
+  open.forEach(f => {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="t">${esc(f.text)}<small>${f.after ? "From " + esc(f.after) + " · " : ""}noted ${ukDate(f.at)}</small></span><button aria-label="Done">✓</button>`;
+    li.children[1].onclick = () => { f.done = true; save("followups"); renderFollowups(); };
+    ul.appendChild(li);
+  });
+}
+
+function renderAll(){ renderHistory(); renderTasks(); renderMem(); renderDocs(); renderWritten(); renderFollowups(); }
 function netStatus(){ $("net").textContent = navigator.onLine ? "● online" : "○ offline"; $("net").style.color = navigator.onLine ? "var(--green)" : "var(--red)"; }
 window.addEventListener("online", netStatus); window.addEventListener("offline", netStatus);
 document.addEventListener("visibilitychange", () => { if (document.hidden && live) stopLive(); });
