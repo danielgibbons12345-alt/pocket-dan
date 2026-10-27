@@ -228,7 +228,7 @@ async function loadAll(){
   S.history = await DB.get("history", []);
   S.docs = await DB.get("docs", []);
   if (!S.settings.model) S.settings.model = "gemini-flash-latest";
-  if (!S.settings.rate) S.settings.rate = 1.0;
+  if (!S.settings.rate) S.settings.rate = 1.05;
 }
 const save = (k) => DB.set(k, S[k]);
 
@@ -300,65 +300,80 @@ ${open}
 
 Knowledge files ${name} has loaded: ${docs}
 
-Rules for the JSON you return:
-- "reply": what you say out loud.
-- "remember": new durable facts worth keeping (people, workplace, preferences, ongoing cases, decisions). Short, one fact each. Save when ${name} says "remember". Don't repeat facts already in memory. Empty if nothing new.
-- "forget": exact text of memory lines to delete when ${name} asks you to forget something or a fact is now wrong.
-- "add_tasks": tasks to add when ${name} asks (text and optional due as a plain date like "Fri 30 Oct").
-- "complete_tasks": exact text of open tasks to mark done.
-- "message": only when ${name} asks you to send or draft a text/message: who it's to, and the body written as ${name} would send it. Say in "reply" that it's ready to send.
-- When you use a knowledge file, mention its name briefly in "reply".`;
+How to reply:
+- First, write only what you say out loud, as natural speech.
+- Then, ONLY if something needs saving or doing, add a new line containing exactly ###ACTIONS### followed by one JSON object on a single line. Possible keys (include only the ones you need):
+  "remember": [new durable facts worth keeping: people, workplace, preferences, ongoing cases, decisions; short, one fact each; always when ${name} says "remember"; never repeat facts already in memory],
+  "forget": [exact text of memory lines to delete when ${name} asks you to forget something or a fact is now wrong],
+  "add_tasks": [{"text": "...", "due": "plain date like Fri 30 Oct, or empty"}],
+  "complete_tasks": [exact text of open tasks to mark done],
+  "message": {"to": "who", "body": "the text written as ${name} would send it"} (only when ${name} asks you to send or draft a message; say out loud that it's ready to send).
+- Never read the actions line out loud or mention it.
+- When you use a knowledge file, mention its name briefly.`;
 }
 
-const SCHEMA = {
-  type:"OBJECT",
-  properties:{
-    reply:{ type:"STRING" },
-    remember:{ type:"ARRAY", items:{ type:"STRING" } },
-    forget:{ type:"ARRAY", items:{ type:"STRING" } },
-    add_tasks:{ type:"ARRAY", items:{ type:"OBJECT", properties:{ text:{type:"STRING"}, due:{type:"STRING"} }, required:["text"] } },
-    complete_tasks:{ type:"ARRAY", items:{ type:"STRING" } },
-    message:{ type:"OBJECT", properties:{ to:{type:"STRING"}, body:{type:"STRING"} } }
-  },
-  required:["reply"]
-};
+const MARK = "###ACTIONS###";
+let noThinking = true;
 
-async function askDan(userText, signal){
+// Streams Dan's answer. onSpeech(sentence) is called as soon as each sentence is ready.
+async function askDan(userText, signal, onSpeech){
   const hits = searchDocs(userText + " " + S.history.slice(-2).map(h => h.text).join(" "));
   let context = "";
   if (hits.length) context = "\n\n[Relevant extracts from knowledge files]\n" + hits.map(h => `--- ${h.doc} ---\n${h.text}`).join("\n\n");
   const recent = S.history.slice(-24);
   const contents = recent.map(h => ({ role: h.role === "dan" ? "model" : "user", parts:[{ text:h.text }] }));
   contents.push({ role:"user", parts:[{ text: userText + context }] });
-  const body = {
-    systemInstruction:{ parts:[{ text: systemPrompt() }] },
-    contents,
-    generationConfig:{ temperature:0.6, responseMimeType:"application/json", responseSchema:SCHEMA, maxOutputTokens:2048 }
-  };
   const models = [S.settings.model, "gemini-2.5-flash", "gemini-2.5-flash-lite"].filter((m, i, a) => m && a.indexOf(m) === i);
   let lastErr;
   for (const model of models) {
-    try {
-      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-        method:"POST", signal,
-        headers:{ "Content-Type":"application/json", "x-goog-api-key": S.settings.key },
-        body: JSON.stringify(body)
-      });
-      const j = await r.json().catch(() => ({}));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const gen = { temperature:0.6, maxOutputTokens:2048 };
+      if (noThinking) gen.thinkingConfig = { thinkingBudget:0 };
+      const body = { systemInstruction:{ parts:[{ text: systemPrompt() }] }, contents, generationConfig:gen };
+      let r;
+      try {
+        r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
+          method:"POST", signal, headers:{ "Content-Type":"application/json", "x-goog-api-key": S.settings.key }, body: JSON.stringify(body)
+        });
+      } catch (e) { if (e.name === "AbortError") throw e; lastErr = e; break; }
       if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
         const msg = (j.error && j.error.message) || ("HTTP " + r.status);
         if (r.status === 429) throw Object.assign(new Error("Daily free limit reached for now. Try again a bit later."), { fatal:true });
         if (r.status === 400 && /api key/i.test(msg)) throw Object.assign(new Error("Your Gemini key isn't working. Check it in Settings."), { fatal:true });
         if (r.status === 403) throw Object.assign(new Error("Google refused the key (403). Check it in Settings."), { fatal:true });
-        lastErr = new Error(msg); continue; // e.g. model not found → try next
+        if (r.status === 400 && /think/i.test(msg) && noThinking) { noThinking = false; continue; }
+        lastErr = new Error(msg); break; // try next model
       }
-      const txt = (((j.candidates || [])[0] || {}).content || {}).parts?.map(p => p.text || "").join("") || "";
-      let out; try { out = JSON.parse(txt); } catch (e) { out = { reply: txt || "Sorry, I lost my train of thought there." }; }
-      if (!out.reply) out.reply = "Done.";
+      // read the SSE stream
+      const reader = r.body.getReader(); const dec = new TextDecoder();
+      let buf = "", full = "", spokenUpTo = 0;
+      const flush = (final) => {
+        const cut = full.indexOf(MARK);
+        let speakable = cut >= 0 ? full.slice(0, cut) : full;
+        if (!final && cut < 0) { const h = speakable.lastIndexOf("#"); if (h >= 0 && h > speakable.length - MARK.length) speakable = speakable.slice(0, h); }
+        const pending = speakable.slice(spokenUpTo);
+        let end = -1;
+        if (final || cut >= 0) end = pending.length;
+        else { const re = /[.!?…](["')\]]?)(\s|$)|\n/g; let m; while ((m = re.exec(pending))) { if (m.index + m[0].length < pending.length || /\s$/.test(m[0])) end = m.index + m[0].length; } if (end < 0 && pending.length > 220) { const c = pending.lastIndexOf(", "); if (c > 60) end = c + 2; } }
+        if (end > 0) { const s = pending.slice(0, end).trim(); spokenUpTo += end; if (s) onSpeech(s); }
+      };
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream:true });
+        let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+          if (!line.startsWith("data:")) continue;
+          try { const j = JSON.parse(line.slice(5)); const t = (((j.candidates || [])[0] || {}).content || {}).parts?.map(p => p.thought ? "" : (p.text || "")).join("") || ""; if (t) { full += t; flush(false); } } catch (e) {}
+        }
+      }
+      flush(true);
+      const cut = full.indexOf(MARK);
+      const out = { reply: (cut >= 0 ? full.slice(0, cut) : full).trim() || "Done." };
+      if (cut >= 0) { try { const js = full.slice(cut + MARK.length).replace(/```(json)?/g, "").trim(); Object.assign(out, JSON.parse(js.slice(js.indexOf("{"), js.lastIndexOf("}") + 1))); out.reply = (cut >= 0 ? full.slice(0, cut) : full).trim() || "Done."; } catch (e) {} }
       return out;
-    } catch (e) {
-      if (e.name === "AbortError" || e.fatal) throw e;
-      lastErr = e;
     }
   }
   throw lastErr || new Error("Couldn't reach Gemini.");
@@ -412,7 +427,10 @@ function pickVoice(){
   const vs = voices();
   if (S.settings.voice) { const v = vs.find(v => v.voiceURI === S.settings.voice || v.name === S.settings.voice); if (v) return v; }
   const gb = vs.filter(v => /en[-_]GB/i.test(v.lang));
-  const prefer = ["Daniel", "Arthur", "Oliver", "Malcolm", "George", "Google UK English Male"];
+  const prefer = ["Daniel", "Arthur", "Jamie", "Oliver", "Malcolm", "George", "Google UK English Male"];
+  // Prefer the higher-quality downloaded (Premium / Enhanced) British male voices first
+  const hq = gb.filter(v => /premium|enhanced/i.test(v.name) || /premium|enhanced/i.test(v.voiceURI));
+  for (const p of prefer) { const v = hq.find(v => v.name.includes(p)); if (v) return v; }
   for (const p of prefer) { const v = gb.find(v => v.name.includes(p)) || vs.find(v => v.name.includes(p) && /en/i.test(v.lang)); if (v) return v; }
   return gb[0] || vs.find(v => /^en/i.test(v.lang)) || null;
 }
@@ -420,52 +438,63 @@ function speak(text){
   return new Promise(res => {
     if (!synth) return res();
     try {
-      synth.cancel();
       const u = new SpeechSynthesisUtterance(text.replace(/[*#_`]/g, ""));
       const v = pickVoice(); if (v) { u.voice = v; u.lang = v.lang; } else u.lang = "en-GB";
-      u.rate = Number(S.settings.rate) || 1; u.pitch = 0.95;
-      let done = false; const fin = () => { if (!done) { done = true; res(); } };
+      u.rate = Number(S.settings.rate) || 1.05; u.pitch = 0.9;
+      let done = false; const fin = () => { if (!done) { done = true; clearTimeout(to); res(); } };
       u.onend = fin; u.onerror = fin;
-      // safety timeout in case onend never fires (iOS quirk)
-      setTimeout(fin, Math.max(4000, text.length * 110));
+      const to = setTimeout(fin, Math.max(3000, text.length * 120)); // iOS sometimes never fires onend
       synth.speak(u);
     } catch (e) { res(); }
   });
 }
+// Sentence queue so Dan starts talking while the rest of his answer is still arriving
+const SQ = { items:[], playing:false, waiters:[], stopped:false };
+function sqReset(){ SQ.items = []; SQ.playing = false; SQ.stopped = false; SQ.waiters.splice(0).forEach(f => f()); }
+function sqPush(s){ if (SQ.stopped) return; SQ.items.push(s); if (!SQ.playing) sqNext(); }
+async function sqNext(){
+  if (SQ.stopped || !SQ.items.length) { SQ.playing = false; SQ.waiters.splice(0).forEach(f => f()); return; }
+  SQ.playing = true; setMode("speaking"); setStatus("Speaking… (tap the chat to interrupt)");
+  await speak(SQ.items.shift());
+  sqNext();
+}
+function sqDone(){ return (!SQ.playing && !SQ.items.length) ? Promise.resolve() : new Promise(r => SQ.waiters.push(r)); }
+function sqStop(){ SQ.stopped = true; SQ.items = []; try { synth && synth.cancel(); } catch (e) {} SQ.playing = false; SQ.waiters.splice(0).forEach(f => f()); }
 
+const PAUSE_MS = 1500; // how long you can pause mid-sentence before Dan replies
 function startListening(){
   if (!live || busy) return;
   if (!SR) { setStatus("Voice input isn't supported here – type instead"); return; }
+  let heard = "", silenceTimer = null, sent = false;
+  const finish = () => {
+    if (sent) return; sent = true; clearTimeout(silenceTimer);
+    const said = heard.trim(); $("interim").textContent = "";
+    try { rec && rec.stop(); } catch (e) {}
+    if (said && live) { silentRestarts = 0; handleUser(said, true); }
+  };
   try {
     rec = new SR();
-    rec.lang = "en-GB"; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 1;
-    let finalText = "", gotResult = false;
-    rec.onstart = () => { setMode("listening"); setStatus("Listening…"); };
+    rec.lang = "en-GB"; rec.continuous = true; rec.interimResults = true; rec.maxAlternatives = 1;
+    rec.onstart = () => { setMode("listening"); setStatus("Listening… (just talk)"); };
     rec.onresult = (e) => {
-      let interim = ""; finalText = "";
-      for (let i = 0; i < e.results.length; i++) {
-        if (e.results[i].isFinal) finalText += e.results[i][0].transcript; else interim += e.results[i][0].transcript;
-      }
-      $("interim").textContent = (finalText + " " + interim).trim();
-      if (finalText) gotResult = true;
+      let t = "";
+      for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
+      heard = t; $("interim").textContent = t;
+      clearTimeout(silenceTimer); silenceTimer = setTimeout(finish, PAUSE_MS);
     };
     rec.onerror = (e) => {
       if (e.error === "not-allowed" || e.error === "service-not-allowed") {
         stopLive();
-        addLog("sys", "Microphone blocked. Allow it in Settings → Safari → Microphone (or Settings → Apps → Safari). If you opened Dan from the Home Screen and it won't hear you, open him in Safari instead.");
+        addLog("sys", "Microphone blocked. Allow it in Settings → Apps → Safari → Microphone. If the Home Screen icon won't hear you, open Dan in Safari instead.");
       }
     };
     rec.onend = () => {
       rec = null;
-      const said = ($("interim").textContent || finalText).trim();
-      $("interim").textContent = "";
-      if (!live) return;
-      if ((gotResult || said) && said) { silentRestarts = 0; handleUser(said, true); }
-      else {
-        silentRestarts++;
-        if (silentRestarts > 40) { stopLive(); addLog("sys", "Conversation paused after a long silence. Tap to talk again."); return; }
-        setTimeout(startListening, 150);
-      }
+      if (sent || !live) return;
+      if (heard.trim()) { finish(); return; }
+      silentRestarts++;
+      if (silentRestarts > 60) { stopLive(); addLog("sys", "Conversation paused after a long silence. Tap to talk again."); return; }
+      setTimeout(startListening, 100);
     };
     rec.start();
   } catch (e) { setTimeout(startListening, 400); }
@@ -478,16 +507,24 @@ async function handleUser(text, viaVoice){
   S.history.push({ role:"me", text, at:Date.now() });
   setMode("thinking"); setStatus("Thinking…");
   abortCtl = new AbortController();
+  const speakOut = live || viaVoice === "speak";
+  sqReset();
+  const bubble = addLog("dan", "…");
+  let shown = "";
   try {
-    const out = await askDan(text, abortCtl.signal);
+    const out = await askDan(text, abortCtl.signal, (sentence) => {
+      shown += (shown ? " " : "") + sentence; bubble.textContent = shown; $("log").scrollTop = 1e9;
+      if (speakOut) sqPush(sentence);
+    });
+    bubble.textContent = out.reply;
     S.history.push({ role:"dan", text:out.reply, at:Date.now() });
     if (S.history.length > 400) S.history = S.history.slice(-400);
     save("history");
-    addLog("dan", out.reply);
     applyActions(out);
-    if (live || viaVoice === "speak") { setMode("speaking"); setStatus("Speaking…"); await speak(out.reply); }
+    if (speakOut) await sqDone();
   } catch (e) {
-    if (e.name !== "AbortError") { addLog("sys", e.message || String(e)); if (live) await speak(e.fatal ? e.message : "Sorry, I couldn't connect. Say that again?"); if (e.fatal) stopLive(); }
+    if (bubble.textContent === "…") bubble.remove();
+    if (e.name !== "AbortError") { addLog("sys", e.message || String(e)); if (live) { sqReset(); sqPush(e.fatal ? e.message : "Sorry, I didn't catch a connection there. Say that again?"); await sqDone(); } if (e.fatal) stopLive(); }
   }
   busy = false; abortCtl = null;
   if (live) startListening(); else { setMode("idle"); setStatus("Tap to talk"); }
@@ -500,17 +537,16 @@ async function startLive(){
   try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; synth && synth.speak(u); } catch (e) {}
   try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
   const name = S.settings.name ? ", " + S.settings.name : "";
-  const greet = S.history.length ? `I'm here${name}.` : `Dan 2.0 online. Good to meet you${name}. What can I do for you?`;
+  const greet = S.history.length ? `Go ahead${name}.` : `Dan 2.0 online. Good to meet you${name}. What can I do for you?`;
   if (!S.history.length) { addLog("dan", greet); S.history.push({ role:"dan", text:greet, at:Date.now() }); save("history"); }
-  setMode("speaking"); setStatus("Speaking…");
-  await speak(greet);
+  sqReset(); sqPush(greet); await sqDone();
   if (live) startListening();
 }
 function stopLive(){
   live = false;
   document.body.classList.remove("live"); $("orbLbl").textContent = "TALK";
   try { rec && rec.abort(); } catch (e) {} rec = null;
-  try { synth && synth.cancel(); } catch (e) {}
+  sqStop();
   try { abortCtl && abortCtl.abort(); } catch (e) {}
   try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null;
   busy = false; $("interim").textContent = "";
@@ -620,6 +656,7 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
 $("orb").onclick = () => { if (!S.settings.key) { $("setup").classList.add("on"); return; } live ? stopLive() : startLive(); };
 const sendTyped = () => { const v = $("typeIn").value.trim(); if (!v || busy) return; $("typeIn").value = ""; try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; synth && synth.speak(u); } catch (e) {} if (rec) { try { rec.abort(); } catch (e) {} } handleUser(v, live ? true : "speak"); };
 $("typeGo").onclick = sendTyped;
+$("log").onclick = () => { if (live && document.body.classList.contains("speaking")) { sqStop(); } };
 $("typeIn").onkeydown = (e) => { if (e.key === "Enter") sendTyped(); };
 $("taskAdd").onclick = () => { const v = $("taskIn").value.trim(); if (!v) return; S.tasks.push({ id:uid(), text:v, due:"", done:false, at:Date.now() }); $("taskIn").value = ""; save("tasks"); renderTasks(); };
 $("memAdd").onclick = () => { const v = $("memIn").value.trim(); if (!v) return; S.memories.push({ id:uid(), text:v, at:Date.now() }); $("memIn").value = ""; save("memories"); renderMem(); };
@@ -627,7 +664,7 @@ $("fileBtn").onclick = () => $("fileIn").click();
 $("fileIn").onchange = (e) => { handleFiles([...e.target.files]); e.target.value = ""; };
 $("pasteAdd").onclick = async () => { const n = $("pasteName").value.trim() || "Pasted note " + ukDate(Date.now()); const t = $("pasteText").value; try { await addDoc(n, t); $("pasteName").value = ""; $("pasteText").value = ""; $("fileErr").textContent = "Saved " + n; } catch (e) { $("fileErr").textContent = e.message; } };
 $("sSave").onclick = () => { S.settings.name = $("sName").value.trim(); S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
-$("sTest").onclick = () => { S.settings.voice = $("sVoice").value; S.settings.rate = Number($("sRate").value); speak("Dan 2.0, at your service."); };
+$("sTest").onclick = () => { S.settings.voice = $("sVoice").value; S.settings.rate = Number($("sRate").value); try { synth.cancel(); } catch (e) {} speak("Dan 2.0, at your service."); };
 $("bExport").onclick = () => {
   const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs });
   const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], { type:"application/json" }));
