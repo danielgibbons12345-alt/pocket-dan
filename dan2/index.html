@@ -180,6 +180,9 @@ li.done .chk{background:var(--cyan2)}
     <div class="field"><label>Typed-chat voice (iPhone voices)</label><select id="sVoice"></select></div>
     <div class="field"><label>Speaking speed</label><input type="range" id="sRate" min="0.8" max="1.3" step="0.05"></div>
     <div class="row"><button class="btn pri" id="sSave">Save</button><button class="btn" id="sTest">Test voice</button></div>
+    <h2>Calendar sync</h2>
+    <p class="hint" id="calInfo">Not synced yet.</p>
+    <p class="hint">To let Dan see your iPhone Calendar, make a Shortcut called <b>Dan Calendar</b> that opens this page with your events (Claude gave you the steps). Run it whenever you like, or automatically each morning.</p>
     <h2>Backup</h2>
     <p class="hint">Back up Dan's memory, tasks and files now and then, so you can restore them on a new phone.</p>
     <div class="row">
@@ -253,6 +256,7 @@ async function loadAll(){
   S.history = await DB.get("history", []);
   S.docs = await DB.get("docs", []);
   S.written = await DB.get("written", []);
+  S.calendar = await DB.get("calendar", null);
   if (S.settings.autoNotes === undefined) S.settings.autoNotes = true;
   if (!S.settings.model) S.settings.model = "gemini-flash-latest";
   if (!S.settings.rate) S.settings.rate = 1.05;
@@ -342,6 +346,9 @@ ${open}
 
 Knowledge files ${name} has loaded: ${docs}
 
+${name}'s calendar (from their iPhone${S.calendar ? ", synced " + new Date(S.calendar.at).toLocaleString("en-GB", { timeZone:"Europe/London", weekday:"short", day:"numeric", month:"short", hour:"2-digit", minute:"2-digit" }) : ""}):
+${S.calendar ? S.calendar.text : "(not synced yet: if asked about their diary, explain they can tap their 'Dan Calendar' shortcut to sync it)"}
+
 How to reply:
 - First, write only what you say out loud, as natural speech.
 - Then, ONLY if something needs saving or doing, add a new line containing exactly ###ACTIONS### followed by one JSON object on a single line. Possible keys (include only the ones you need):
@@ -352,6 +359,7 @@ How to reply:
   "message": {"to": "who", "body": "the text written as ${name} would send it"} (only when ${name} asks you to send or draft a message; say out loud that it's ready to send),
   "document": {"title": "...", "content": "the full document"} (when asked to write/create a document, letter, policy, report, notes; write it in full, properly structured; say out loud it's saved in Docs and keep the spoken part short),
   "email": {"to": "address or empty for ${name}'s own email", "subject": "...", "body": "..."} (when asked to email something; say out loud it's ready to send),
+  "event": {"title": "...", "start": "YYYY-MM-DDTHH:MM in UK time", "end": "YYYY-MM-DDTHH:MM or empty", "allDay": false, "location": "", "notes": ""} (when asked to put something in the calendar or diary; say it's ready to add with one tap),
   "spreadsheet": {"title": "...", "csv": "CSV with a header row; formulas allowed like =SUM(B2:B10); for extra sheets add a line '### Sheet: Name' before each sheet's CSV"} (when asked for a spreadsheet, tracker, rota, log, budget or table),
   "presentation": {"title": "...", "slides": [{"title": "...", "bullets": ["short point", "..."], "notes": "speaker notes"}]} (when asked for slides, a PowerPoint or a presentation; 5 to 12 slides, 3 to 6 short bullets each).
 - Never read the actions line out loud or mention it.
@@ -456,6 +464,7 @@ function applyActions(out){
   if (out.spreadsheet && out.spreadsheet.csv) { const d = saveWritten(out.spreadsheet.title, out.spreadsheet.csv, "sheet"); showDocCard(d); }
   if (out.presentation && out.presentation.slides && out.presentation.slides.length) { const d = saveWritten(out.presentation.title, slidesToText(out.presentation.slides), "slides"); showDocCard(d); }
   if (out.email && out.email.body) showEmailCard(out.email);
+  if (out.event && out.event.title && out.event.start) showEventCard(out.event);
 }
 
 function showMessageCard(m){
@@ -605,6 +614,7 @@ Use your tools silently (never say you're calling a tool):
 - create_spreadsheet: when asked for a spreadsheet, Excel, tracker, rota, log or budget; build it properly with clear headers, sensible example rows if needed, and formulas for totals.
 - create_presentation: when asked for a PowerPoint, slides or presentation; 5 to 12 slides with short punchy bullets and speaker notes.
 - After creating either, say briefly it's in Docs; don't read it out.
+- add_calendar_event: when asked to book, schedule or put anything in the calendar; work out the exact date from today's date; then say it's ready and to tap Add to Calendar. Check their calendar above for clashes and mention any.
 - draft_email: when asked to email something (to ${S.settings.name || "the user"} by default); then say it's ready to send.
 ${recent ? "\nRecent conversation, for continuity:\n" + recent : ""}`;
 }
@@ -619,6 +629,7 @@ const LIVE_TOOLS = [{ functionDeclarations: [
   { name:"create_document", description:"Write and save a full document (letter, policy, report, notes, checklist, procedure) to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, content:{ type:"STRING", description:"the complete document text, well structured with headings" } }, required:["title","content"] } },
   { name:"create_spreadsheet", description:"Create an Excel spreadsheet (tracker, rota, log, budget, checklist, table) saved to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, csv:{ type:"STRING", description:"CSV with a header row. Formulas allowed, e.g. =SUM(B2:B10). For more sheets put a line '### Sheet: Name' before each sheet's CSV." } }, required:["title","csv"] } },
   { name:"create_presentation", description:"Create a PowerPoint presentation saved to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, slides:{ type:"ARRAY", items:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, bullets:{ type:"ARRAY", items:{ type:"STRING" } }, notes:{ type:"STRING" } }, required:["title"] } } }, required:["title","slides"] } },
+  { name:"add_calendar_event", description:"Create a calendar event for the user to add to their iPhone Calendar with one tap", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, start:{ type:"STRING", description:"YYYY-MM-DDTHH:MM, UK local time" }, end:{ type:"STRING", description:"YYYY-MM-DDTHH:MM, or empty for one hour" }, allDay:{ type:"BOOLEAN" }, location:{ type:"STRING" }, notes:{ type:"STRING" } }, required:["title","start"] } },
   { name:"draft_email", description:"Prepare an email for the user to send. Leave 'to' empty to send it to the user's own email.", parameters:{ type:"OBJECT", properties:{ to:{ type:"STRING" }, subject:{ type:"STRING" }, body:{ type:"STRING" } }, required:["subject","body"] } }
 ]}];
 
@@ -633,6 +644,7 @@ function runTool(name, a){
     else if (name === "create_document") applyActions({ document:{ title:a.title, content:a.content } });
     else if (name === "create_spreadsheet") applyActions({ spreadsheet:{ title:a.title, csv:a.csv } });
     else if (name === "create_presentation") applyActions({ presentation:{ title:a.title, slides:a.slides } });
+    else if (name === "add_calendar_event") applyActions({ event:a });
     else if (name === "draft_email") applyActions({ email:{ to:a.to || "", subject:a.subject, body:a.body } });
     else if (name === "search_documents") {
       const hits = searchDocs(a.query || "", 4);
@@ -903,7 +915,7 @@ function fillVoices(){
   if (cur) sel.value = cur.voiceURI;
 }
 function fillSettings(){
-  $("sName").value = S.settings.name || ""; $("sKey").value = S.settings.key || ""; $("sEmail").value = S.settings.email || ""; $("sPersona").value = S.settings.persona || ""; $("sNotes").checked = S.settings.autoNotes !== false;
+  $("sName").value = S.settings.name || ""; $("sKey").value = S.settings.key || ""; $("sEmail").value = S.settings.email || ""; $("calInfo").textContent = S.calendar ? "Last synced " + new Date(S.calendar.at).toLocaleString("en-GB", { timeZone:"Europe/London", weekday:"short", day:"numeric", month:"short", hour:"2-digit", minute:"2-digit" }) + "." : "Not synced yet."; $("sPersona").value = S.settings.persona || ""; $("sNotes").checked = S.settings.autoNotes !== false;
   $("sModel").value = S.settings.model; $("sLiveVoice").innerHTML = LIVE_VOICES.map(v => `<option>${v}</option>`).join(""); $("sLiveVoice").value = S.settings.liveVoice || "Charon"; $("sRate").value = S.settings.rate; fillVoices();
   $("about").textContent = `Dan 2.0 · ${S.memories.length} memories · ${S.tasks.filter(t => !t.done).length} open tasks · ${S.docs.length} files. Everything is stored on this phone only.`;
 }
@@ -1112,6 +1124,39 @@ $("vShare").onclick = () => { if (!vDoc) return; vDoc.content = $("vBody").value
 $("vCopy").onclick = async () => { try { await navigator.clipboard.writeText($("vBody").value); $("vCopy").textContent = "Copied ✓"; } catch (e) { $("vCopy").textContent = "Couldn't copy"; } setTimeout(() => $("vCopy").textContent = "Copy", 1500); };
 $("vDel").onclick = () => { if (!vDoc) return; if (!$("vDel").dataset.sure) { $("vDel").dataset.sure = 1; $("vDel").textContent = "Tap again"; return; } delete $("vDel").dataset.sure; $("vDel").textContent = "Delete"; S.written = S.written.filter(x => x !== vDoc); save("written"); vDoc = null; $("viewer").style.display = "none"; renderWritten(); };
 
+/* ---------- Calendar ---------- */
+function icsDate(s){ const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(String(s || "")); if (!m) return null; return { d:m[1] + m[2] + m[3], t:m[4] ? m[4] + m[5] + "00" : null, js:new Date(+m[1], m[2] - 1, +m[3], +(m[4] || 9), +(m[5] || 0)) }; }
+function icsEsc(t){ return String(t || "").replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/([,;])/g, "\\$1"); }
+function makeICS(e){
+  const st = icsDate(e.start); if (!st) return null;
+  let en = icsDate(e.end);
+  const pad = n => String(n).padStart(2, "0");
+  const fmt = d => d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + "T" + pad(d.getHours()) + pad(d.getMinutes()) + "00";
+  const allDay = e.allDay || !st.t;
+  const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Dan 2.0//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH", "BEGIN:VEVENT",
+    "UID:" + uid() + "@dan2", "DTSTAMP:" + new Date().toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z", "SUMMARY:" + icsEsc(e.title)];
+  if (allDay) { const nd = new Date(st.js); nd.setDate(nd.getDate() + 1); lines.push("DTSTART;VALUE=DATE:" + st.d, "DTEND;VALUE=DATE:" + (en && en.d > st.d ? en.d : fmt(nd).slice(0, 8))); }
+  else { const endJs = en && en.t ? en.js : new Date(st.js.getTime() + 3600e3); lines.push("DTSTART:" + st.d + "T" + st.t, "DTEND:" + fmt(endJs)); }
+  if (e.location) lines.push("LOCATION:" + icsEsc(e.location));
+  if (e.notes) lines.push("DESCRIPTION:" + icsEsc(e.notes));
+  lines.push("BEGIN:VALARM", "ACTION:DISPLAY", "DESCRIPTION:" + icsEsc(e.title), "TRIGGER:-PT30M", "END:VALARM", "END:VEVENT", "END:VCALENDAR");
+  return lines.join("\r\n");
+}
+function showEventCard(e){
+  const ics = makeICS(e); if (!ics) { addLog("sys", "Dan couldn't work out the date for that event."); return; }
+  const st = icsDate(e.start).js;
+  const when = (e.allDay || !icsDate(e.start).t) ? st.toLocaleDateString("en-GB", { weekday:"long", day:"numeric", month:"long" }) : st.toLocaleString("en-GB", { weekday:"long", day:"numeric", month:"long", hour:"2-digit", minute:"2-digit" });
+  const c = document.createElement("div"); c.className = "card";
+  c.innerHTML = `<b>📅 Calendar event</b><div class="body">${esc(e.title)}\n${esc(when)}${e.location ? "\n" + esc(e.location) : ""}</div><div class="row"><button class="btn pri add">Add to Calendar</button></div>`;
+  c.querySelector(".add").onclick = async () => {
+    const file = new File([ics], (e.title || "event").replace(/[^\w\- ]+/g, "").slice(0, 40) + ".ics", { type:"text/calendar" });
+    const url = URL.createObjectURL(file);
+    const a = document.createElement("a"); a.href = url; a.target = "_self"; document.body.appendChild(a); a.click(); a.remove();
+  };
+  $("log").appendChild(c); $("log").scrollTop = 1e9;
+  if (S.calendar) { S.calendar.text += "\n" + when + " – " + e.title + " (just added by Dan)"; DB.set("calendar", S.calendar); }
+}
+
 function renderAll(){ renderHistory(); renderTasks(); renderMem(); renderDocs(); renderWritten(); }
 function netStatus(){ $("net").textContent = navigator.onLine ? "● online" : "○ offline"; $("net").style.color = navigator.onLine ? "var(--green)" : "var(--red)"; }
 window.addEventListener("online", netStatus); window.addEventListener("offline", netStatus);
@@ -1120,7 +1165,18 @@ if (synth && "onvoiceschanged" in synth) synth.onvoiceschanged = fillVoices;
 
 (async () => {
   try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
-  await loadAll(); renderAll(); netStatus();
+  await loadAll();
+  // Calendar sync from the iPhone Shortcut: ...?cal=<events text>
+  try {
+    const q = new URLSearchParams(location.search); const cal = q.get("cal");
+    if (cal !== null) {
+      S.calendar = { text: cal.trim().slice(0, 12000) || "(no events in the synced period)", at: Date.now() };
+      await DB.set("calendar", S.calendar);
+      history.replaceState(null, "", location.pathname);
+      setTimeout(() => addLog("sys", "📅 Calendar synced – Dan can see your upcoming events."), 300);
+    }
+  } catch (e) {}
+  renderAll(); netStatus();
   if (!S.settings.key) { $("setup").classList.add("on"); $("setName").value = S.settings.name || ""; }
 })();
 </script>
