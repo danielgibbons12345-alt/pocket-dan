@@ -344,7 +344,9 @@ How to reply:
   "complete_tasks": [exact text of open tasks to mark done],
   "message": {"to": "who", "body": "the text written as ${name} would send it"} (only when ${name} asks you to send or draft a message; say out loud that it's ready to send),
   "document": {"title": "...", "content": "the full document"} (when asked to write/create a document, letter, policy, report, notes; write it in full, properly structured; say out loud it's saved in Docs and keep the spoken part short),
-  "email": {"to": "address or empty for ${name}'s own email", "subject": "...", "body": "..."} (when asked to email something; say out loud it's ready to send).
+  "email": {"to": "address or empty for ${name}'s own email", "subject": "...", "body": "..."} (when asked to email something; say out loud it's ready to send),
+  "spreadsheet": {"title": "...", "csv": "CSV with a header row; formulas allowed like =SUM(B2:B10); for extra sheets add a line '### Sheet: Name' before each sheet's CSV"} (when asked for a spreadsheet, tracker, rota, log, budget or table),
+  "presentation": {"title": "...", "slides": [{"title": "...", "bullets": ["short point", "..."], "notes": "speaker notes"}]} (when asked for slides, a PowerPoint or a presentation; 5 to 12 slides, 3 to 6 short bullets each).
 - Never read the actions line out loud or mention it.
 - When you use a knowledge file, mention its name briefly.`;
 }
@@ -442,6 +444,8 @@ function applyActions(out){
   if (changed.t) { save("tasks"); renderTasks(); }
   if (out.message && out.message.body) showMessageCard(out.message);
   if (out.document && out.document.content) { const d = saveWritten(out.document.title, out.document.content); showDocCard(d); }
+  if (out.spreadsheet && out.spreadsheet.csv) { const d = saveWritten(out.spreadsheet.title, out.spreadsheet.csv, "sheet"); showDocCard(d); }
+  if (out.presentation && out.presentation.slides && out.presentation.slides.length) { const d = saveWritten(out.presentation.title, slidesToText(out.presentation.slides), "slides"); showDocCard(d); }
   if (out.email && out.email.body) showEmailCard(out.email);
 }
 
@@ -587,6 +591,9 @@ Use your tools silently (never say you're calling a tool):
 - search_documents: ALWAYS use this before answering anything that could be covered by the loaded knowledge files, and mention which file you used.
 - draft_message: when asked to text or message someone; then say it's ready to send.
 - create_document: when asked to write or create any document, letter, policy, report or notes; write it in full; then say briefly it's saved in Docs (don't read it all out).
+- create_spreadsheet: when asked for a spreadsheet, Excel, tracker, rota, log or budget; build it properly with clear headers, sensible example rows if needed, and formulas for totals.
+- create_presentation: when asked for a PowerPoint, slides or presentation; 5 to 12 slides with short punchy bullets and speaker notes.
+- After creating either, say briefly it's in Docs; don't read it out.
 - draft_email: when asked to email something (to ${S.settings.name || "the user"} by default); then say it's ready to send.
 ${recent ? "\nRecent conversation, for continuity:\n" + recent : ""}`;
 }
@@ -599,6 +606,8 @@ const LIVE_TOOLS = [{ functionDeclarations: [
   { name:"search_documents", description:"Search the user's loaded knowledge files (employment law, food manufacturing, policies, SOPs)", parameters:{ type:"OBJECT", properties:{ query:{ type:"STRING" } }, required:["query"] } },
   { name:"draft_message", description:"Draft a text message for the user to send", parameters:{ type:"OBJECT", properties:{ to:{ type:"STRING" }, body:{ type:"STRING" } }, required:["body"] } },
   { name:"create_document", description:"Write and save a full document (letter, policy, report, notes, checklist, procedure) to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, content:{ type:"STRING", description:"the complete document text, well structured with headings" } }, required:["title","content"] } },
+  { name:"create_spreadsheet", description:"Create an Excel spreadsheet (tracker, rota, log, budget, checklist, table) saved to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, csv:{ type:"STRING", description:"CSV with a header row. Formulas allowed, e.g. =SUM(B2:B10). For more sheets put a line '### Sheet: Name' before each sheet's CSV." } }, required:["title","csv"] } },
+  { name:"create_presentation", description:"Create a PowerPoint presentation saved to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, slides:{ type:"ARRAY", items:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, bullets:{ type:"ARRAY", items:{ type:"STRING" } }, notes:{ type:"STRING" } }, required:["title"] } } }, required:["title","slides"] } },
   { name:"draft_email", description:"Prepare an email for the user to send. Leave 'to' empty to send it to the user's own email.", parameters:{ type:"OBJECT", properties:{ to:{ type:"STRING" }, subject:{ type:"STRING" }, body:{ type:"STRING" } }, required:["subject","body"] } }
 ]}];
 
@@ -611,6 +620,8 @@ function runTool(name, a){
     else if (name === "complete_task") applyActions({ complete_tasks:[a.text] });
     else if (name === "draft_message") applyActions({ message:{ to:a.to || "", body:a.body } });
     else if (name === "create_document") applyActions({ document:{ title:a.title, content:a.content } });
+    else if (name === "create_spreadsheet") applyActions({ spreadsheet:{ title:a.title, csv:a.csv } });
+    else if (name === "create_presentation") applyActions({ presentation:{ title:a.title, slides:a.slides } });
     else if (name === "draft_email") applyActions({ email:{ to:a.to || "", subject:a.subject, body:a.body } });
     else if (name === "search_documents") {
       const hits = searchDocs(a.query || "", 4);
@@ -930,30 +941,106 @@ function showEmailCard(e){
 }
 function showDocCard(d){
   const c = document.createElement("div"); c.className = "card";
-  c.innerHTML = `<b>Saved to Docs</b><div class="body">${esc(d.title)}</div><div class="row"><button class="btn pri op">Open</button><a class="btn" href="${mailtoLink("", d.title, d.content)}">Email it</a></div>`;
+  const office = d.kind === "sheet" || d.kind === "slides";
+  c.innerHTML = `<b>${d.kind === "sheet" ? "Spreadsheet saved to Docs" : d.kind === "slides" ? "Presentation saved to Docs" : "Saved to Docs"}</b><div class="body">${esc(d.title)}</div><div class="row"><button class="btn pri op">Open</button>${office ? '<button class="btn sh">' + (d.kind === "sheet" ? "Open in Excel" : "Open in PowerPoint") + '</button>' : `<a class="btn" href="${mailtoLink("", d.title, d.content)}">Email it</a>`}</div>`;
   c.querySelector(".op").onclick = () => openViewer(d);
+  if (office) { c.querySelector(".sh").onclick = () => shareDoc(d); needLib(d.kind === "sheet" ? "xlsx" : "pptx").catch(() => {}); }
   $("log").appendChild(c); $("log").scrollTop = 1e9;
 }
 let vDoc = null;
-function openViewer(d){ vDoc = d; $("vTitle").textContent = d.title; $("vBody").value = d.content; $("viewer").style.display = "flex"; }
+function openViewer(d){ vDoc = d; $("vTitle").textContent = d.title; $("vBody").value = d.content; $("viewer").style.display = "flex";
+  $("vShare").textContent = d.kind === "sheet" ? "Open in Excel / Share" : d.kind === "slides" ? "Open in PowerPoint / Share" : "Share / Word";
+  $("vEmail").textContent = (d.kind === "sheet" || d.kind === "slides") ? "Email file" : "Email";
+  if (d.kind === "sheet") needLib("xlsx").catch(() => {}); if (d.kind === "slides") needLib("pptx").catch(() => {}); }
 function closeViewer(){ if (vDoc && $("vBody").value !== vDoc.content) { vDoc.content = $("vBody").value; save("written"); } $("viewer").style.display = "none"; vDoc = null; renderWritten(); }
 function wordBlob(d){
   const html = `<html><head><meta charset="utf-8"><title>${esc(d.title)}</title></head><body style="font-family:Calibri,Arial;font-size:11pt"><h1 style="font-size:16pt">${esc(d.title)}</h1>` +
     esc(d.content).split(/\n{2,}/).map(p => "<p>" + p.replace(/\n/g, "<br>") + "</p>").join("") + "</body></html>";
   return new Blob(["\ufeff" + html], { type:"application/msword" });
 }
+/* ---------- Excel & PowerPoint ---------- */
+const LIBS = { xlsx:"https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js", pptx:"https://cdnjs.cloudflare.com/ajax/libs/pptxgenjs/3.12.0/pptxgen.bundle.js" };
+function needLib(k){ if (k === "xlsx" && window.XLSX) return Promise.resolve(); if (k === "pptx" && window.PptxGenJS) return Promise.resolve(); return loadScript(LIBS[k]); }
+function parseCSV(text){
+  const rows = []; let row = [], cell = "", q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += c; }
+    else if (c === '"') q = true;
+    else if (c === ",") { row.push(cell); cell = ""; }
+    else if (c === "\n") { row.push(cell); rows.push(row); row = []; cell = ""; }
+    else if (c !== "\r") cell += c;
+  }
+  if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter(r => r.some(x => x.trim() !== ""));
+}
+function sheetsFromText(t){ // "### Sheet: Name" separates sheets
+  const out = []; let cur = { name:"Sheet1", lines:[] };
+  t.split("\n").forEach(l => { const m = /^#{2,3}\s*Sheet\s*:\s*(.+)$/i.exec(l.trim()); if (m) { if (cur.lines.join("").trim()) out.push(cur); cur = { name:m[1].trim().slice(0, 31), lines:[] }; } else cur.lines.push(l); });
+  if (cur.lines.join("").trim()) out.push(cur);
+  return out.map(s => ({ name:s.name, rows:parseCSV(s.lines.join("\n")) }));
+}
+async function xlsxBlob(d){
+  await needLib("xlsx");
+  const wb = XLSX.utils.book_new();
+  sheetsFromText(d.content).forEach((sh, si) => {
+    const aoa = sh.rows.map(r => r.map(v => { v = v.trim(); if (/^=/.test(v)) return { t:"n", f:v.slice(1) }; if (/^-?£?\d[\d,]*(\.\d+)?%?$/.test(v) && !/^0\d/.test(v)) { const n = parseFloat(v.replace(/[£,%]/g, "")); return v.endsWith("%") ? { t:"n", v:n / 100, z:"0%" } : (v.includes("£") ? { t:"n", v:n, z:"£#,##0.00" } : n); } return v; }));
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const widths = []; aoa.forEach(r => r.forEach((v, i) => { const len = String(typeof v === "object" ? (v.v ?? v.f ?? "") : v).length; widths[i] = Math.min(50, Math.max(widths[i] || 8, len + 2)); }));
+    ws["!cols"] = widths.map(w => ({ wch:w }));
+    XLSX.utils.book_append_sheet(wb, ws, (sh.name || "Sheet" + (si + 1)).replace(/[\\\/\?\*\[\]:]/g, "").slice(0, 31) || "Sheet" + (si + 1));
+  });
+  const out = XLSX.write(wb, { bookType:"xlsx", type:"array" });
+  return new Blob([out], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+}
+function slidesFromText(t){ // "# Title" starts a slide, "- " bullets, "Notes: " speaker notes
+  const slides = []; let cur = null;
+  t.split("\n").forEach(l => {
+    const s = l.trim(); if (!s) return;
+    if (/^#\s*/.test(s)) { cur = { title:s.replace(/^#+\s*/, ""), bullets:[], notes:"" }; slides.push(cur); }
+    else { if (!cur) { cur = { title:"", bullets:[], notes:"" }; slides.push(cur); } if (/^notes?\s*:/i.test(s)) cur.notes += s.replace(/^notes?\s*:\s*/i, "") + " "; else cur.bullets.push(s.replace(/^[-•*]\s*/, "")); }
+  });
+  return slides;
+}
+function slidesToText(slides){ return (slides || []).map(s => "# " + (s.title || "") + "\n" + (s.bullets || []).map(b => "- " + b).join("\n") + (s.notes ? "\nNotes: " + s.notes : "")).join("\n\n"); }
+async function pptxBlob(d){
+  await needLib("pptx");
+  const p = new PptxGenJS(); p.layout = "LAYOUT_WIDE"; p.title = d.title;
+  const NAVY = "0B1F33", CYAN = "1FA7D1", INK = "1E293B";
+  const slides = slidesFromText(d.content);
+  const t = p.addSlide(); t.background = { color:NAVY };
+  t.addShape(p.ShapeType.rect, { x:0.6, y:3.55, w:1.4, h:0.08, fill:{ color:CYAN }, line:{ color:CYAN } });
+  t.addText(d.title, { x:0.6, y:1.6, w:12, h:1.8, fontSize:40, bold:true, color:"FFFFFF", fontFace:"Calibri" });
+  t.addText(new Date().toLocaleDateString("en-GB", { day:"numeric", month:"long", year:"numeric" }) + (S.settings.name ? " · " + S.settings.name : ""), { x:0.6, y:3.8, w:12, h:0.5, fontSize:16, color:"A9C4D9", fontFace:"Calibri" });
+  slides.forEach((s, i) => {
+    if (i === 0 && s.title.trim().toLowerCase() === d.title.trim().toLowerCase() && !s.bullets.length) return;
+    const sl = p.addSlide(); sl.background = { color:"FFFFFF" };
+    sl.addShape(p.ShapeType.rect, { x:0, y:0, w:13.33, h:0.12, fill:{ color:CYAN }, line:{ color:CYAN } });
+    sl.addText(s.title || d.title, { x:0.6, y:0.4, w:12.1, h:0.9, fontSize:30, bold:true, color:NAVY, fontFace:"Calibri" });
+    if (s.bullets.length) sl.addText(s.bullets.map(b => ({ text:b, options:{ bullet:{ indent:18 }, paraSpaceAfter:10 } })), { x:0.7, y:1.5, w:11.9, h:5.4, fontSize:s.bullets.length > 6 ? 18 : 22, color:INK, fontFace:"Calibri", valign:"top" });
+    sl.addText(String(i + 1), { x:12.4, y:6.95, w:0.6, h:0.35, fontSize:11, color:"94A3B8", align:"right" });
+    if (s.notes.trim()) sl.addNotes(s.notes.trim());
+  });
+  return await p.write({ outputType:"blob" });
+}
+async function fileFor(d){
+  const base = d.title.replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || "Document";
+  if (d.kind === "sheet") return new File([await xlsxBlob(d)], base + ".xlsx", { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  if (d.kind === "slides") return new File([await pptxBlob(d)], base + ".pptx", { type:"application/vnd.openxmlformats-officedocument.presentationml.presentation" });
+  return new File([wordBlob(d)], base + ".doc", { type:"application/msword" });
+}
 async function shareDoc(d){
-  const fname = d.title.replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || "Document";
-  const file = new File([wordBlob(d)], fname + ".doc", { type:"application/msword" });
+  let file; try { file = await fileFor(d); } catch (e) { alertBox("Couldn't build the file: " + e.message); return; }
   try { if (navigator.canShare && navigator.canShare({ files:[file] })) { await navigator.share({ files:[file], title:d.title }); return; } } catch (e) { if (e.name === "AbortError") return; }
   const a = document.createElement("a"); a.href = URL.createObjectURL(file); a.download = file.name; document.body.appendChild(a); a.click(); a.remove();
 }
+function alertBox(t){ addLog("sys", t); }
 function renderWritten(){
   const ul = $("wList"); if (!ul) return; ul.innerHTML = "";
-  if (!S.written.length) ul.innerHTML = '<li><span class="t" style="color:var(--dim)">Nothing yet. Try: "Dan, write me an invite letter for a disciplinary meeting."</span></li>';
+  if (!S.written.length) ul.innerHTML = '<li><span class="t" style="color:var(--dim)">Nothing yet. Try: "Dan, write me an invite letter for a disciplinary meeting", "make me an Excel training tracker" or "do me a 6-slide PowerPoint on allergen awareness".</span></li>';
   S.written.forEach(d => {
     const li = document.createElement("li"); li.style.cursor = "pointer";
-    li.innerHTML = `<span class="t">${d.kind === "notes" ? "📝 " : "📄 "}${esc(d.title)}<small>${ukDate(d.at)} · ${Math.max(1, Math.round(d.content.split(/\s+/).length))} words</small></span><span style="color:var(--dim)">›</span>`;
+    li.innerHTML = `<span class="t">${({ notes:"📝 ", sheet:"📊 ", slides:"📽️ " })[d.kind] || "📄 "}${esc(d.title)}<small>${ukDate(d.at)} · ${d.kind === "sheet" ? "Excel" : d.kind === "slides" ? "PowerPoint · " + slidesFromText(d.content).length + " slides" : Math.max(1, Math.round(d.content.split(/\s+/).length)) + " words"}</small></span><span style="color:var(--dim)">›</span>`;
     li.onclick = () => openViewer(d); ul.appendChild(li);
   });
 }
@@ -980,7 +1067,7 @@ async function makeCallNotes(turns, started){
   $("log").appendChild(c); $("log").scrollTop = 1e9;
 }
 $("vClose").onclick = closeViewer;
-$("vEmail").onclick = () => { if (!vDoc) return; vDoc.content = $("vBody").value; save("written"); location.href = mailtoLink("", vDoc.title, vDoc.content); };
+$("vEmail").onclick = () => { if (!vDoc) return; vDoc.content = $("vBody").value; save("written"); if (vDoc.kind === "sheet" || vDoc.kind === "slides") { shareDoc(vDoc); return; } location.href = mailtoLink("", vDoc.title, vDoc.content); };
 $("vShare").onclick = () => { if (!vDoc) return; vDoc.content = $("vBody").value; save("written"); shareDoc(vDoc); };
 $("vCopy").onclick = async () => { try { await navigator.clipboard.writeText($("vBody").value); $("vCopy").textContent = "Copied ✓"; } catch (e) { $("vCopy").textContent = "Couldn't copy"; } setTimeout(() => $("vCopy").textContent = "Copy", 1500); };
 $("vDel").onclick = () => { if (!vDoc) return; if (!$("vDel").dataset.sure) { $("vDel").dataset.sure = 1; $("vDel").textContent = "Tap again"; return; } delete $("vDel").dataset.sure; $("vDel").textContent = "Delete"; S.written = S.written.filter(x => x !== vDoc); save("written"); vDoc = null; $("viewer").style.display = "none"; renderWritten(); };
