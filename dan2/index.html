@@ -197,6 +197,8 @@ li.done .chk{background:var(--cyan2)}
     <p class="hint">Say "add a task to…" or "mark … as done". Or add one here.</p>
     <div class="row" style="margin-bottom:12px"><input id="taskIn" placeholder="New task" style="flex:1"><button class="btn pri" id="taskAdd">Add</button></div>
     <ul class="items" id="taskList"></ul>
+    <h2 style="margin-top:22px">Check-ins &amp; important dates</h2>
+    <ul class="items" id="careList"></ul>
     <h2 style="margin-top:22px">Dan will follow up on</h2>
     <ul class="items" id="fuList"></ul>
   </section>
@@ -341,6 +343,8 @@ async function loadAll(){
   S.lessons = await DB.get("lessons", []);
   S.study = await DB.get("study", { unit:"3CO01", topics:[] });
   S.otj = await DB.get("otj", []);
+  S.care = await DB.get("care", []);
+  S.dates = await DB.get("dates", []);
   if (S.settings.autoNotes === undefined) S.settings.autoNotes = true;
   if (!S.settings.model) S.settings.model = "gemini-flash-latest";
   if (!S.settings.rate) S.settings.rate = 1.05;
@@ -439,6 +443,15 @@ ${S.profile || "(not built yet)"}
 
 Things you planned to follow up on with ${name}:
 ${(S.followups || []).filter(f => !f.done).map(f => "- " + f.text + (f.after ? " (raise from " + f.after + ")" : "") + " [noted " + ukDate(f.at) + "]").join("\n") || "(none)"}
+
+CARING CHECK-INS (emotional intelligence – you genuinely care about ${name}):
+- After anything tough or significant (a disciplinary or difficult conversation, a bad breakdown or audit, a rough or long shift, illness, stress, worry, family news, a big deadline or exam), quietly schedule a caring check-in with add_checkin for a sensible time (usually the next day; "today" is ${todayIso()}).
+- When a check-in is due, open with it warmly and briefly BEFORE any business – like a mate would: "Before anything else – how did you feel after yesterday's meeting with Alex?" Listen properly; acknowledge feelings before offering fixes; don't push if they'd rather not talk. Then call resolve_checkin.
+- Celebrate wins genuinely (passed a unit, clean audit, sorted a breakdown, good feedback) and remember them; bring them up later when it would lift ${name}.
+- Important dates: when ${name} mentions a birthday, anniversary, exam, assignment deadline, holiday or other date that matters, save it with save_important_date and mention it at the right time (on the day, or a few days before for deadlines).
+- Keep it natural and occasional – one caring touch per call at most, never preachy. If ${name} ever sounds really low or overwhelmed, be kind and steady, suggest a break or someone to talk to (their company's employee assistance line, GP, or Samaritans on 116 123), and don't try to be a therapist.
+- Due now: ${dueCare().map(c => (c.type === "celebrate" ? "Celebrate: " : "Check in: ") + c.text).join(" | ") || "(nothing due)"}
+- Dates coming up: ${upcomingDates().join(" | ") || "(none)"}
 
 STUDY MODE (CIPD) – use whenever ${name} wants to study, revise, be quizzed, or work on an assignment:
 - Be a brilliant, encouraging tutor. Teach with the Socratic method: ask questions, get ${name} to explain ideas back, then fill gaps. Use real examples from ${name}'s world (a food factory, shifts, lines, HR cases) to make theory stick.
@@ -789,6 +802,9 @@ const LIVE_TOOLS = [{ functionDeclarations: [
   { name:"create_presentation", description:"Create a PowerPoint presentation saved to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, slides:{ type:"ARRAY", items:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, bullets:{ type:"ARRAY", items:{ type:"STRING" } }, notes:{ type:"STRING" } }, required:["title"] } } }, required:["title","slides"] } },
   { name:"deep_think", description:"Hand a hard question to Dan's expert reasoning engine (slower, ~5-15s, much more careful). Use for anything complex or high-stakes: employment law situations, HR process decisions, food safety/HACCP judgements, root-cause problems on machines, calculations, plans, or when the user asks you to think harder or double-check.", parameters:{ type:"OBJECT", properties:{ question:{ type:"STRING", description:"the full question, self-contained" }, context:{ type:"STRING", description:"relevant facts from the conversation" } }, required:["question"] } },
   { name:"save_lesson", description:"Save a correction or lesson from the user so you never repeat the mistake (e.g. site-specific values, preferences on how to do things)", parameters:{ type:"OBJECT", properties:{ lesson:{ type:"STRING", description:"e.g. 'Our CIP caustic is 2% at 75C, not 1.5%'" } }, required:["lesson"] } },
+  { name:"add_checkin", description:"Schedule a caring check-in (how they're feeling after something tough) or a celebration to raise in a later call", parameters:{ type:"OBJECT", properties:{ text:{ type:"STRING", description:"e.g. 'Ask how he felt after running Alex's disciplinary'" }, after:{ type:"STRING", description:"YYYY-MM-DD when to raise it, usually tomorrow" }, type:{ type:"STRING", description:"wellbeing or celebrate" } }, required:["text"] } },
+  { name:"resolve_checkin", description:"Mark a caring check-in as done once you've asked", parameters:{ type:"OBJECT", properties:{ text:{ type:"STRING" } }, required:["text"] } },
+  { name:"save_important_date", description:"Remember an important date for the user (birthday, anniversary, exam, assignment deadline, holiday)", parameters:{ type:"OBJECT", properties:{ what:{ type:"STRING", description:"e.g. 'My birthday', '3CO01 assignment deadline', 'Holiday to Spain'" }, date:{ type:"STRING", description:"YYYY-MM-DD" }, yearly:{ type:"BOOLEAN", description:"true for birthdays/anniversaries" } }, required:["what","date"] } },
   { name:"record_study", description:"Record CIPD study progress: a topic or AC covered, quiz score, confidence and weak spots", parameters:{ type:"OBJECT", properties:{ unit:{ type:"STRING", description:"e.g. 3CO01" }, topic:{ type:"STRING", description:"e.g. AC 2.1 culture – Schein's three levels" }, score:{ type:"STRING", description:"e.g. 4/6, or empty" }, confidence:{ type:"STRING", description:"low, medium or high" }, note:{ type:"STRING", description:"weak spots or next step" } }, required:["topic"] } },
   { name:"review_draft", description:"Give detailed tutor feedback on the user's assignment draft against the CIPD assessment criteria (never rewrites it). Use the name of a draft file they loaded, or paste text.", parameters:{ type:"OBJECT", properties:{ file:{ type:"STRING", description:"part of the draft file's name, if loaded in Files" }, text:{ type:"STRING", description:"draft text, if not a file" }, ac:{ type:"STRING", description:"which AC(s), e.g. 1.1 or all" } } } },
   { name:"add_followup", description:"Save something to follow up with the user about in a later conversation", parameters:{ type:"OBJECT", properties:{ text:{ type:"STRING", description:"what to ask about, e.g. 'Ask if Sam replied about the night-shift rota'" }, after:{ type:"STRING", description:"optional plain date from when to raise it, e.g. Fri 30 Oct" } }, required:["text"] } },
@@ -815,6 +831,9 @@ function runTool(name, a){
     else if (name === "create_spreadsheet") applyActions({ spreadsheet:{ title:a.title, csv:a.csv } });
     else if (name === "create_presentation") applyActions({ presentation:{ title:a.title, slides:a.slides } });
     else if (name === "add_calendar_event") applyActions({ event:a });
+    else if (name === "add_checkin") { S.care.push({ id:uid(), text:a.text, after:/^\d{4}-\d{2}-\d{2}$/.test(a.after || "") ? a.after : tomorrowIso(), type:/celeb/i.test(a.type || "") ? "celebrate" : "wellbeing", at:Date.now(), done:false }); DB.set("care", S.care); renderCare(); return { result:"scheduled" }; }
+    else if (name === "resolve_checkin") { const tl = (a.text || "").toLowerCase(); const c = S.care.find(x => !x.done && (x.text.toLowerCase().includes(tl) || tl.includes(x.text.toLowerCase()))) || dueCare()[0]; if (c) { c.done = true; DB.set("care", S.care); renderCare(); } return { result:"ok" }; }
+    else if (name === "save_important_date") { if (!/^\d{4}-\d{2}-\d{2}$/.test(a.date || "")) return { error:"date must be YYYY-MM-DD" }; S.dates = S.dates.filter(d => !(d.what.toLowerCase() === (a.what || "").toLowerCase())); S.dates.push({ id:uid(), what:a.what, date:a.date, yearly:!!a.yearly }); DB.set("dates", S.dates); renderCare(); return { result:"saved" }; }
     else if (name === "record_study") { S.study = S.study || { unit:"3CO01", topics:[] }; if (a.unit) S.study.unit = a.unit; S.study.topics.push({ topic:a.topic, score:a.score || "", confidence:a.confidence || "", note:a.note || "", at:Date.now() }); if (S.study.topics.length > 200) S.study.topics = S.study.topics.slice(-200); DB.set("study", S.study); renderStudy(); return { result:"saved" }; }
     else if (name === "review_draft") return reviewDraft(a).then(r => { setMode("speaking"); return r; });
     else if (name === "add_followup") applyActions({ followups:[{ text:a.text, after:a.after || "" }] });
@@ -891,7 +910,7 @@ function connectLive(mi, isReconnect){
       L.ready = true; L.swapping = false; S.settings.liveModel = model; S.settings.liveNoSearch = !!L.noSearch; save("settings"); L.reconnects = 0; $("camBtn").disabled = false;
       setMode("listening"); setStatus("I'm listening…");
       if (!isReconnect && S.pendingStudy) { S.pendingStudy = false; ws.send(JSON.stringify({ realtimeInput:{ text:"(Call started from the Study button. Greet me briefly and go straight into CIPD study mode: ask whether I want to learn a topic, have a quick quiz, or work on my assignment, and suggest one based on my progress.)" } })); return; }
-      if (!isReconnect) ws.send(JSON.stringify({ realtimeInput:{ text: S.history.length ? "(Call connected. It is " + ukNow() + ". Pick up like a friend would, in a few words that fit the time of day. If one of your follow-ups is due, or something from our recent chats is worth a quick mention, you may bring up one thing briefly; otherwise just say hi.)" : "(First ever call. Introduce yourself warmly and briefly as Dan 2.0, and ask me something about myself so you can get to know me.)" } }));
+      if (!isReconnect) ws.send(JSON.stringify({ realtimeInput:{ text: S.history.length ? "(Call connected. It is " + ukNow() + ". " + (dueCare().length ? "You have a caring check-in due (" + dueCare()[0].text + "): pick up warmly and open with that, briefly, before anything else. " : todayDates().length ? "Today: " + todayDates().join(", ") + " – mention it warmly. " : "") + "Pick up like a friend would, in a few words that fit the time of day. If one of your follow-ups is due, or something from our recent chats is worth a quick mention, you may bring up one thing briefly; otherwise just say hi.)" : "(First ever call. Introduce yourself warmly and briefly as Dan 2.0, and ask me something about myself so you can get to know me.)" } }));
       return;
     }
     const sc = m.serverContent;
@@ -1320,7 +1339,7 @@ $("pasteAdd").onclick = async () => { const n = $("pasteName").value.trim() || "
 $("sSave").onclick = () => { S.settings.accent = $("sAccent").value; S.settings.name = $("sName").value.trim(); S.settings.email = $("sEmail").value.trim(); S.settings.persona = $("sPersona").value.trim(); S.settings.autoNotes = $("sNotes").checked; S.settings.location = $("sLoc").checked; if (S.settings.location) refreshLocation(8000); S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); tickClock(); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
 $("sTest").onclick = () => { S.settings.voice = $("sVoice").value; S.settings.rate = Number($("sRate").value); try { synth.cancel(); } catch (e) {} speak("Dan 2.0, at your service."); };
 $("bExport").onclick = () => {
-  const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs.map(d => ({ ...d, vecs:undefined })), written:S.written, followups:S.followups, profile:S.profile, lessons:S.lessons, study:S.study, otj:S.otj });
+  const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs.map(d => ({ ...d, vecs:undefined })), written:S.written, followups:S.followups, profile:S.profile, lessons:S.lessons, study:S.study, otj:S.otj, care:S.care, dates:S.dates });
   const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], { type:"application/json" }));
   a.download = "dan2-backup-" + new Date().toISOString().slice(0, 10) + ".json"; document.body.appendChild(a); a.click(); a.remove();
 };
@@ -1329,7 +1348,7 @@ $("bFile").onchange = async (e) => {
   const f = e.target.files[0]; if (!f) return;
   try {
     const d = JSON.parse(await f.text()); if (d.app !== "dan2") throw new Error("Not a Dan 2.0 backup");
-    S.memories = d.memories || []; S.tasks = d.tasks || []; S.history = d.history || []; S.docs = d.docs || []; S.written = d.written || []; S.followups = d.followups || []; S.profile = d.profile || ""; DB.set("profile", S.profile); S.lessons = d.lessons || []; DB.set("lessons", S.lessons); S.study = d.study || S.study; DB.set("study", S.study); S.otj = d.otj || S.otj || []; DB.set("otj", S.otj);
+    S.memories = d.memories || []; S.tasks = d.tasks || []; S.history = d.history || []; S.docs = d.docs || []; S.written = d.written || []; S.followups = d.followups || []; S.profile = d.profile || ""; DB.set("profile", S.profile); S.lessons = d.lessons || []; DB.set("lessons", S.lessons); S.study = d.study || S.study; DB.set("study", S.study); S.otj = d.otj || S.otj || []; DB.set("otj", S.otj); S.care = d.care || []; DB.set("care", S.care); S.dates = d.dates || []; DB.set("dates", S.dates);
     S.settings = { ...S.settings, ...(d.settings || {}), key:S.settings.key };
     await Promise.all(["memories","tasks","history","docs","written","followups","settings"].map(save));
     renderAll(); fillSettings(); $("about").textContent = "Backup restored ✓";
@@ -1806,6 +1825,22 @@ function renderStudy(){
   if (!t.length) ul.innerHTML = '<li><span class="t" style="color:var(--dim)">Nothing yet. Tap 🎓 Study on the main screen, or say "Dan, let\'s do some CIPD".</span></li>';
   [...t].reverse().slice(0, 40).forEach(x => { const li = document.createElement("li"); li.innerHTML = `<span class="t">🎓 ${esc(x.topic)}<small>${esc([x.score, x.confidence && x.confidence + " confidence", x.note].filter(Boolean).join(" · "))} · ${ukDate(x.at)}</small></span>`; ul.appendChild(li); });
 }
+function isoOf(d){ return d.toLocaleDateString("en-CA", { timeZone:"Europe/London" }); }
+function todayIso(){ return isoOf(new Date()); }
+function tomorrowIso(){ return isoOf(new Date(Date.now() + 864e5)); }
+function dueCare(){ const t = todayIso(); return (S.care || []).filter(c => !c.done && (c.after || "") <= t); }
+function nextOccurrence(d){ if (!d.yearly) return d.date; const t = todayIso(); const y = +t.slice(0, 4); const md = d.date.slice(5); const cand = y + "-" + md; return cand >= t ? cand : (y + 1) + "-" + md; }
+function daysUntil(iso){ return Math.round((new Date(iso + "T12:00:00") - new Date(todayIso() + "T12:00:00")) / 864e5); }
+function upcomingDates(){ return (S.dates || []).map(d => ({ d, n:daysUntil(nextOccurrence(d)) })).filter(x => x.n >= 0 && x.n <= 14).sort((a, b) => a.n - b.n).map(x => `${x.d.what}: ${x.n === 0 ? "TODAY" : x.n === 1 ? "tomorrow" : "in " + x.n + " days"} (${new Date(nextOccurrence(x.d) + "T12:00:00").toLocaleDateString("en-GB", { weekday:"short", day:"numeric", month:"short" })})`); }
+function todayDates(){ return (S.dates || []).filter(d => daysUntil(nextOccurrence(d)) === 0).map(d => d.what); }
+function renderCare(){
+  const ul = $("careList"); if (!ul) return; ul.innerHTML = "";
+  const open = (S.care || []).filter(c => !c.done);
+  const dates = (S.dates || []).slice().sort((a, b) => nextOccurrence(a).localeCompare(nextOccurrence(b)));
+  if (!open.length && !dates.length) ul.innerHTML = '<li><span class="t" style="color:var(--dim)">Dan adds these himself after tough days, wins and important dates you mention.</span></li>';
+  open.forEach(c => { const li = document.createElement("li"); li.innerHTML = `<span class="t">${c.type === "celebrate" ? "🎉" : "💙"} ${esc(c.text)}<small>From ${new Date(c.after + "T12:00:00").toLocaleDateString("en-GB", { weekday:"short", day:"numeric", month:"short" })}</small></span><button aria-label="Done">✓</button>`; li.children[1].onclick = () => { c.done = true; DB.set("care", S.care); renderCare(); }; ul.appendChild(li); });
+  dates.forEach(d => { const li = document.createElement("li"); const n = daysUntil(nextOccurrence(d)); li.innerHTML = `<span class="t">📅 ${esc(d.what)}<small>${new Date(nextOccurrence(d) + "T12:00:00").toLocaleDateString("en-GB", { day:"numeric", month:"long", year:"numeric" })}${d.yearly ? " · every year" : ""}${n >= 0 ? " · in " + n + " days" : ""}</small></span><button aria-label="Delete">✕</button>`; li.children[1].onclick = () => { S.dates = S.dates.filter(x => x !== d); DB.set("dates", S.dates); renderCare(); }; ul.appendChild(li); });
+}
 function renderFollowups(){
   const ul = $("fuList"); if (!ul) return; ul.innerHTML = "";
   const open = S.followups.filter(f => !f.done);
@@ -1861,7 +1896,7 @@ async function healthCheck(){
 }
 $("hcRun").onclick = healthCheck;
 
-function renderAll(){ renderHistory(); renderTasks(); renderMem(); renderDocs(); renderWritten(); renderFollowups(); renderLessons(); renderStudy(); renderOtj(); }
+function renderAll(){ renderHistory(); renderTasks(); renderMem(); renderDocs(); renderWritten(); renderFollowups(); renderLessons(); renderStudy(); renderOtj(); renderCare(); }
 function netStatus(){ $("net").textContent = navigator.onLine ? "● online" : "○ offline"; $("net").style.color = navigator.onLine ? "var(--green)" : "var(--red)"; }
 window.addEventListener("online", netStatus); window.addEventListener("offline", netStatus);
 document.addEventListener("visibilitychange", () => { if (document.hidden && live) stopLive(); });
