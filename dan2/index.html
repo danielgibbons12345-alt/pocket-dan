@@ -215,8 +215,9 @@ li.done .chk{background:var(--cyan2)}
 
   <section id="files" class="view">
     <h2>Knowledge files</h2>
+    <p class="hint"><b>WhatsApp ops group:</b> in WhatsApp open the group → tap its name → <b>Export Chat</b> → <b>Without Media</b> → <b>Save to Files</b>. Then tap + Add files and choose that file. Dan keeps first names only and removes phone numbers, then builds an issue log of faults, causes, fixes and escalations. Re-import any time to update it.</p>
     <p class="hint">Add PDFs, Word (.docx) or text files, such as ACAS guides, legislation, HACCP plans or SOPs. Dan searches them when he answers and says which file he used.</p>
-    <input type="file" id="fileIn" accept=".pdf,.docx,.txt,.md,.csv,application/pdf,text/plain,image/*" multiple style="display:none">
+    <input type="file" id="fileIn" accept=".pdf,.docx,.txt,.md,.csv,.zip,application/pdf,text/plain,application/zip,image/*" multiple style="display:none">
     <button class="btn pri" id="fileBtn" style="width:100%;padding:14px">+ Add files</button>
     <div class="err" id="fileErr" style="color:var(--dim)"></div>
     <h2>Or paste text</h2>
@@ -717,6 +718,7 @@ Use your tools silently (never say you're calling a tool):
 - deep_think: for complex or high-stakes questions (employment law, HR decisions, food safety, machine root causes, calculations, plans) call deep_think instead of answering off the top of your head. Say something natural first ("Give me a second to think that through properly"). Then put its ANSWER into your own words; mention confidence if it's not high, and the checks.
 - save_lesson: whenever the user corrects you or tells you how things are done at their site, save it immediately. Lessons override your general knowledge and library.
 - Self-check: before giving any legal or food safety answer, make sure it's consistent with the lessons, the user's files and the library, and name the source (e.g. "the ACAS Code says…"). If unsure, say so.
+- Diagnosing problems: when ${S.settings.name || "the user"} reports a fault or problem, search_documents for the same machine/area and symptom in the "Ops issue log" and "WhatsApp" files (previous incidents, causes, fixes, who it was escalated to) as well as the technical library and lessons. Say what happened before and what fixed it, spot recurring patterns ("that's the third time this month on Line 2"), suggest the likely cause and next checks, and who to escalate to if it matches past escalations. Use deep_think for tricky root causes.
 - search_documents: ALWAYS use this before answering anything that could be covered by the loaded knowledge files, and mention which file you used.
 - draft_message: when asked to text or message someone; then say it's ready to send.
 - Google Search: use it for anything current or that you're unsure of: news, recent law changes, prices, weather, opening times, sports, companies. Mention the source briefly in speech ("according to the BBC", "gov.uk says"). For UK employment law, prefer gov.uk, legislation.gov.uk and ACAS.
@@ -993,6 +995,87 @@ async function addDoc(name, text){
   S.docs.push({ id:uid(), name, chunks, chars:text.length, at:Date.now() });
   await save("docs"); renderDocs(); indexDocs();
 }
+/* ============================== WhatsApp group import & ops issue log ============================== */
+const WA_RE = /^‎?\[?(\d{1,2})[\/.](\d{1,2})[\/.](\d{2,4}),?\s+(\d{1,2}):(\d{2})(?::\d{2})?\s*(?:[ap]\.?m\.?)?\]?\s*(?:-\s*)?([^:]{1,60}?):\s([\s\S]*)$/i;
+function looksLikeWhatsApp(t){ const lines = t.split("\n").slice(0, 60); return lines.filter(l => WA_RE.test(l.replace(/[‎ ]/g, " "))).length >= 5; }
+function parseWhatsApp(text){
+  const msgs = []; let cur = null;
+  text.replace(/\r/g, "").split("\n").forEach(raw => {
+    const l = raw.replace(/[‎‏ ]/g, " ").replace(/ /g, " ");
+    const m = WA_RE.exec(l);
+    if (m) {
+      let [, d, mo, y, h, mi, who, body] = m; y = y.length === 2 ? "20" + y : y;
+      cur = { ts:new Date(+y, +mo - 1, +d, +h, +mi).getTime(), who:who.trim(), body:body.trim() }; msgs.push(cur);
+    } else if (cur && l.trim()) cur.body += "\n" + l.trim();
+  });
+  return msgs.filter(x => !/^(<Media omitted>|image omitted|video omitted|audio omitted|sticker omitted|GIF omitted|document omitted|This message was deleted|You deleted this message|Messages and calls are end-to-end encrypted)/i.test(x.body) && !/ (joined|left|added|removed|changed the (subject|group|description)|created group)/i.test(x.who + " " + x.body.slice(0, 40)) || x.body.length > 60);
+}
+function privacyClean(msgs){
+  // first names only, no phone numbers or emails
+  return msgs.map(x => ({ ...x,
+    who: /^\+?[\d\s()-]{7,}$/.test(x.who) ? "Unknown" : x.who.split(/\s+/)[0].replace(/[^\p{L}'-]/gu, "") || "Someone",
+    body: x.body.replace(/\+?\d[\d\s-]{9,}\d/g, "[number]").replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, "[email]") }));
+}
+function waFormat(msgs){ return msgs.map(x => { const d = new Date(x.ts); return `${d.toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric" })} ${d.toTimeString().slice(0, 5)} ${x.who}: ${x.body}`; }).join("\n"); }
+async function importWhatsApp(fileName, text){
+  let msgs = parseWhatsApp(text); if (msgs.length < 5) throw new Error("That doesn't look like a WhatsApp export.");
+  msgs = privacyClean(msgs).sort((a, b) => a.ts - b.ts);
+  const group = (fileName.replace(/\.(txt|zip)$/i, "").replace(/^WhatsApp Chat( - | with )?/i, "").replace(/_chat$/i, "").trim()) || "Ops group";
+  const name = "WhatsApp – " + group;
+  const old = S.docs.find(d => d.name === name);
+  await addDoc(name, waFormat(msgs));
+  const doc = S.docs.find(d => d.name === name); doc.kind = "whatsapp"; doc.lastTs = msgs[msgs.length - 1].ts; doc.firstTs = msgs[0].ts; await save("docs"); renderDocs();
+  // build/extend the issue log from messages newer than last time
+  const since = (old && old.logTs) || 0;
+  const fresh = msgs.filter(x => x.ts > since);
+  $("fileErr").textContent = `Imported ${msgs.length} messages. Building the issue log…`;
+  buildIssueLog(group, fresh, name);
+}
+async function buildIssueLog(group, msgs, waName){
+  const logName = "Ops issue log – " + group;
+  const existing = S.docs.find(d => d.name === logName);
+  let lines = existing ? existing.chunks.join("\n").split("\n").filter(l => l.startsWith("• ")) : [];
+  // most recent ~240k characters, in windows of ~14k
+  let txt = waFormat(msgs); if (txt.length > 240000) txt = txt.slice(-240000);
+  const windows = []; for (let i = 0; i < txt.length; i += 14000) windows.push(txt.slice(i, i + 14000));
+  let n = 0;
+  for (const w of windows) {
+    n++; $("fileErr").textContent = `Building the issue log… ${n}/${windows.length}`;
+    const prompt = `This is part of a food factory operations WhatsApp group. Extract every operational incident, fault, breakdown, quality/food-safety issue, escalation or recurring problem. Return ONLY JSON: {"incidents":[{"date":"DD Mon YYYY","area":"line/machine/department e.g. Line 2 Krones labeller, Serac filler, CIP set, despatch","problem":"symptom","cause":"root cause if stated or 'unknown'","fix":"what was done","escalated_to":"who/which team if escalated or ''","downtime":"if mentioned or ''","status":"resolved/ongoing/unknown"}]}. Be concise; merge messages about the same incident; ignore chit-chat.\n\nMESSAGES:\n${w}`;
+    let got = false;
+    for (const model of ["gemini-flash-lite-latest", S.settings.model || "gemini-flash-latest"]) {
+      try {
+        const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, { method:"POST", headers:{ "Content-Type":"application/json", "x-goog-api-key":S.settings.key },
+          body:JSON.stringify({ contents:[{ role:"user", parts:[{ text:prompt }] }], generationConfig:{ temperature:0.1, maxOutputTokens:6000, responseMimeType:"application/json" } }) });
+        if (r.status === 429) { $("fileErr").textContent = "Daily free limit reached – the rest of the issue log will build when you re-import tomorrow."; await saveLog(); return; }
+        if (!r.ok) continue;
+        const j = await r.json(); const t = (((j.candidates || [])[0] || {}).content || {}).parts?.map(p => p.text || "").join("") || "";
+        const out = JSON.parse(t.slice(t.indexOf("{"), t.lastIndexOf("}") + 1));
+        (out.incidents || []).forEach(x => lines.push(`• ${x.date || "?"} | ${x.area || "?"} | Problem: ${x.problem || "?"} | Cause: ${x.cause || "unknown"} | Fix: ${x.fix || "?"}${x.escalated_to ? " | Escalated to: " + x.escalated_to : ""}${x.downtime ? " | Downtime: " + x.downtime : ""} | ${x.status || "unknown"}`));
+        got = true; break;
+      } catch (e) {}
+    }
+    await new Promise(r => setTimeout(r, 700));
+  }
+  await saveLog();
+  async function saveLog(){
+    const text = `OPERATIONS ISSUE LOG – ${group}\nBuilt by Dan from the WhatsApp group. Each line: date | area | problem | cause | fix | escalation | status.\n\n` + lines.join("\n");
+    await addDoc(logName, text);
+    const d = S.docs.find(x => x.name === logName); d.kind = "issuelog";
+    const wa = S.docs.find(x => x.name === waName); if (wa) wa.logTs = wa.lastTs;
+    await save("docs"); renderDocs();
+    $("fileErr").textContent = `✅ Issue log ready: ${lines.length} incidents from ${group}.`;
+    toast(`Ops issue log ready – ${lines.length} incidents`);
+  }
+}
+async function readZipText(file){
+  if (!window.JSZip) await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js");
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const f = Object.values(zip.files).find(z => /\.txt$/i.test(z.name));
+  if (!f) throw new Error("No chat text found in that zip.");
+  return await f.async("string");
+}
+
 async function handleFiles(list){
   for (const f of list) {
     try {
@@ -1000,8 +1083,10 @@ async function handleFiles(list){
       let text = "";
       if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") { text = await extractPdf(f); if (text.replace(/\s/g, "").length < 200) { $("fileErr").textContent = "Scanned PDF – Dan is reading it…"; text = await ocrWithGemini(f); } }
       else if (/\.docx$/i.test(f.name)) text = await extractDocx(f);
+      else if (/\.zip$/i.test(f.name) || /zip/.test(f.type)) text = await readZipText(f);
       else if (/^image\//.test(f.type) || /\.(jpe?g|png|heic|webp)$/i.test(f.name)) { $("fileErr").textContent = "Reading the photo…"; text = await ocrWithGemini(f); }
       else text = await f.text();
+      if (looksLikeWhatsApp(text)) { await importWhatsApp(f.name, text); continue; }
       await addDoc(f.name, text);
       $("fileErr").textContent = "Added " + f.name;
     } catch (e) { $("fileErr").textContent = e.message || String(e); }
@@ -1140,7 +1225,7 @@ function renderDocs(){
   if (!S.docs.length) ul.innerHTML = '<li><span class="t" style="color:var(--dim)">No files yet.</span></li>';
   S.docs.forEach(d => {
     const li = document.createElement("li");
-    li.innerHTML = `<span class="t">${d.builtin ? "⚙️ " : ""}${esc(d.name)}<small>${d.builtin ? "Built into Dan · " : ""}${Math.round(d.chars / 1000)}k characters · added ${ukDate(d.at)}</small></span><button aria-label="Delete">✕</button>`;
+    li.innerHTML = `<span class="t">${d.builtin ? "⚙️ " : d.kind === "whatsapp" ? "💬 " : d.kind === "issuelog" ? "🛠️ " : ""}${esc(d.name)}<small>${d.builtin ? "Built into Dan · " : ""}${Math.round(d.chars / 1000)}k characters · added ${ukDate(d.at)}</small></span><button aria-label="Delete">✕</button>`;
     li.children[1].onclick = () => { S.docs = S.docs.filter(x => x !== d); save("docs"); renderDocs(); };
     ul.appendChild(li);
   });
