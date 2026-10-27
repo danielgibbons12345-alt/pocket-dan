@@ -243,7 +243,8 @@ li.done .chk{background:var(--cyan2)}
     <div class="field"><label>Gemini API key</label><input id="sKey" autocapitalize="off" spellcheck="false"></div>
     <div class="field"><label>Model</label><input id="sModel" autocapitalize="off" spellcheck="false"></div>
     <div class="field"><label>Dan&#39;s personality (optional, e.g. &quot;more sarcastic&quot;, &quot;call me boss&quot;, &quot;keep it professional&quot;)</label><textarea id="sPersona" style="min-height:70px"></textarea></div>
-    <div class="field"><label>Call voice (live calls)</label><select id="sLiveVoice"></select></div>
+    <div class="field"><label>Accent</label><select id="sAccent"></select></div>
+    <div class="field"><label>Call voice (live calls) – Charon, Iapetus and Orus are deepest</label><select id="sLiveVoice"></select></div>
     <div class="field"><label>Typed-chat voice (iPhone voices)</label><select id="sVoice"></select></div>
     <div class="field"><label>Speaking speed</label><input type="range" id="sRate" min="0.8" max="1.3" step="0.05"></div>
     <div class="row"><button class="btn pri" id="sSave">Save</button><button class="btn" id="sTest">Test voice</button></div>
@@ -702,6 +703,17 @@ async function handleUser(text, viaVoice){
 
 /* ============================== Live voice (Gemini Live: real-time, interruptible) ============================== */
 const LIVE_MODELS = ["gemini-3.8-live", "gemini-3.1-flash-live-preview", "gemini-2.5-flash-native-audio-preview-09-2025"];
+const ACCENTS = {
+  "British (standard / RP)": "a clear, standard Southern British English accent (Received Pronunciation), like a BBC presenter",
+  "British (Midlands)": "a natural West Midlands / Worcestershire English accent",
+  "British (Northern)": "a warm Northern English accent (Yorkshire / Manchester)",
+  "British (London)": "a relaxed London English accent",
+  "Scottish": "a gentle Scottish accent",
+  "Irish": "a soft Irish accent",
+  "Welsh": "a lilting Welsh English accent",
+  "American": "a neutral General American accent"
+};
+function accentLine(){ const a = ACCENTS[S.settings.accent] || ACCENTS["British (standard / RP)"]; return a; }
 const LIVE_VOICES = ["Charon", "Orus", "Fenrir", "Iapetus", "Puck", "Algenib", "Schedar"];
 let L = null;
 
@@ -709,7 +721,9 @@ function livePrompt(){
   const base = systemPrompt();
   const head = base.slice(0, base.indexOf("How to reply:"));
   const recent = S.history.slice(-14).map(h => (h.role === "dan" ? "Dan: " : "Me: ") + h.text).join("\n");
-  return head + `This is a live voice call. Speak with a natural British accent and a warm, relaxed tone, with natural rhythm, pauses and the odd "mm" or "right" like a real person. Sound like a mate who happens to be brilliant, not a butler or a robot. Keep it conversational; ${S.settings.name || "the user"} can interrupt you at any time, so stop and listen when they do. Brief acknowledgements like "mm-hm" or "go on" are fine when they're mid-thought.
+  return `VOICE AND ACCENT – TOP PRIORITY: You always speak English with ${accentLine()}. Never slip into an American accent${/American/.test(S.settings.accent || "") ? " (ignore this line: American is requested)" : ""}. Use British vocabulary and spellings in speech ("mobile", "rota", "holiday", "car park", "queue", "brilliant", "cheers"), British pronunciation ("schedule" as SHED-yool, "tomato" as to-MAH-to, "garage" as GA-ridge, "aluminium"), and say dates the British way ("the twenty-ninth of October").
+
+` + head + `This is a live voice call. Speak in that accent with a warm, relaxed tone, with natural rhythm, pauses and the odd "mm" or "right" like a real person. Sound like a mate who happens to be brilliant, not a butler or a robot. Keep it conversational; ${S.settings.name || "the user"} can interrupt you at any time, so stop and listen when they do. Brief acknowledgements like "mm-hm" or "go on" are fine when they're mid-thought.
 
 Use your tools silently (never say you're calling a tool):
 - remember: save new durable facts (always when asked to remember something).
@@ -825,7 +839,7 @@ function connectLive(mi, isReconnect){
   ws.onopen = () => {
     ws.send(JSON.stringify({ setup:{
       model:"models/" + model,
-      generationConfig:{ responseModalities:["AUDIO"], speechConfig:{ voiceConfig:{ prebuiltVoiceConfig:{ voiceName: S.settings.liveVoice || "Charon" } } } },
+      generationConfig:{ responseModalities:["AUDIO"], speechConfig:Object.assign({ voiceConfig:{ prebuiltVoiceConfig:{ voiceName: S.settings.liveVoice || "Charon" } } }, L.noLang ? {} : { languageCode: /American/.test(S.settings.accent || "") ? "en-US" : "en-GB" }) },
       systemInstruction:{ parts:[{ text: livePrompt() }] },
       tools: L.noSearch ? LIVE_TOOLS : [{ googleSearch:{} }, ...LIVE_TOOLS],
       sessionResumption: L.resumeHandle ? { handle:L.resumeHandle } : {},
@@ -863,6 +877,7 @@ function connectLive(mi, isReconnect){
   ws.onerror = () => {};
   ws.onclose = (ev) => {
     if (!L || L.ws !== ws || !live) return;
+    if (!L.ready && !L.noLang && /language/i.test(ev.reason || "")) { L.noLang = true; S.settings.liveNoLang = true; connectLive(mi, isReconnect); return; }
     if (!L.ready && L.resumeHandle) { L.resumeHandle = null; connectLive(mi, isReconnect); return; } // handle expired → fresh session
     if (!L.ready) { L.lastErr = ev.reason || ("connection closed (" + ev.code + ")"); if (/api key|auth|permission denied/i.test(ev.reason || "")) { addLog("sys", "Google refused your key: " + ev.reason); stopLive(); return; } if (!L.noSearch && !/not found|unknown model/i.test(ev.reason || "")) { L.noSearch = true; if (!S.flags_searchNote) { S.flags_searchNote = 1; addLog("sys", "Using Dan’s backup web search (built-in call search isn’t available on your key)."); } connectLive(mi, isReconnect); return; } L.noSearch = false; connectLive(mi + 1, isReconnect); return; }
     // dropped mid-call (sessions have a time limit) → reconnect quietly
@@ -876,7 +891,7 @@ async function startLive(){
   if (live) return;
   live = true; document.body.classList.add("live"); $("orbLbl").textContent = "END";
   setMode("thinking"); setStatus("Connecting…");
-  L = { sources:new Set(), playTime:0, meT:"", danT:"", meB:null, danB:null, histStart:S.history.length, started:Date.now(), noSearch:!!S.settings.liveNoSearch };
+  L = { sources:new Set(), playTime:0, meT:"", danT:"", meB:null, danB:null, histStart:S.history.length, started:Date.now(), noSearch:!!S.settings.liveNoSearch, noLang:!!S.settings.liveNoLang };
   const locP = (S.settings.location !== false) ? refreshLocation(5000) : null;
   try { if (navigator.audioSession) navigator.audioSession.type = "play-and-record"; } catch (e) {}
   try {
@@ -1243,7 +1258,7 @@ function fillVoices(){
 }
 function fillSettings(){
   $("sName").value = S.settings.name || ""; $("sKey").value = S.settings.key || ""; $("sEmail").value = S.settings.email || ""; $("calInfo").textContent = S.calendar ? "Last synced " + new Date(S.calendar.at).toLocaleString("en-GB", { timeZone:"Europe/London", weekday:"short", day:"numeric", month:"short", hour:"2-digit", minute:"2-digit" }) + "." : "Not synced yet."; $("sPersona").value = S.settings.persona || ""; $("sLoc").checked = S.settings.location !== false; $("sNotes").checked = S.settings.autoNotes !== false;
-  $("sModel").value = S.settings.model; $("sLiveVoice").innerHTML = LIVE_VOICES.map(v => `<option>${v}</option>`).join(""); $("sLiveVoice").value = S.settings.liveVoice || "Charon"; $("sRate").value = S.settings.rate; fillVoices();
+  $("sModel").value = S.settings.model; $("sAccent").innerHTML = Object.keys(ACCENTS).map(a => `<option>${a}</option>`).join(""); $("sAccent").value = S.settings.accent || "British (standard / RP)"; $("sLiveVoice").innerHTML = LIVE_VOICES.map(v => `<option>${v}</option>`).join(""); $("sLiveVoice").value = S.settings.liveVoice || "Charon"; $("sRate").value = S.settings.rate; fillVoices();
   $("about").textContent = `Dan 2.0 · ${S.memories.length} memories · ${S.tasks.filter(t => !t.done).length} open tasks · ${S.docs.length} files. Everything is stored on this phone only.`;
 }
 
@@ -1264,7 +1279,7 @@ $("memAdd").onclick = () => { const v = $("memIn").value.trim(); if (!v) return;
 $("fileBtn").onclick = () => $("fileIn").click();
 $("fileIn").onchange = (e) => { handleFiles([...e.target.files]); e.target.value = ""; };
 $("pasteAdd").onclick = async () => { const n = $("pasteName").value.trim() || "Pasted note " + ukDate(Date.now()); const t = $("pasteText").value; try { await addDoc(n, t); $("pasteName").value = ""; $("pasteText").value = ""; $("fileErr").textContent = "Saved " + n; } catch (e) { $("fileErr").textContent = e.message; } };
-$("sSave").onclick = () => { S.settings.name = $("sName").value.trim(); S.settings.email = $("sEmail").value.trim(); S.settings.persona = $("sPersona").value.trim(); S.settings.autoNotes = $("sNotes").checked; S.settings.location = $("sLoc").checked; if (S.settings.location) refreshLocation(8000); S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); tickClock(); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
+$("sSave").onclick = () => { S.settings.accent = $("sAccent").value; S.settings.name = $("sName").value.trim(); S.settings.email = $("sEmail").value.trim(); S.settings.persona = $("sPersona").value.trim(); S.settings.autoNotes = $("sNotes").checked; S.settings.location = $("sLoc").checked; if (S.settings.location) refreshLocation(8000); S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); tickClock(); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
 $("sTest").onclick = () => { S.settings.voice = $("sVoice").value; S.settings.rate = Number($("sRate").value); try { synth.cancel(); } catch (e) {} speak("Dan 2.0, at your service."); };
 $("bExport").onclick = () => {
   const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs.map(d => ({ ...d, vecs:undefined })), written:S.written, followups:S.followups, profile:S.profile, lessons:S.lessons });
