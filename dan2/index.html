@@ -68,7 +68,7 @@ textarea{min-height:90px;resize:vertical}
 #orb:active{transform:scale(.96)}
 #orb .core{position:absolute;inset:24%;border-radius:50%;background:radial-gradient(circle,#7fe6ff 0,var(--cyan2) 60%,rgba(14,143,179,0) 100%);opacity:.5;transition:opacity .3s;filter:blur(.5px)}
 #orb .ring{position:absolute;inset:7%;border-radius:50%;border:2px solid var(--cyan2);opacity:.55}
-#orb .lbl{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px;color:#fff;letter-spacing:3px;text-shadow:0 0 12px rgba(51,214,255,.9)}
+#orb .lbl{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:19px;color:#fff;letter-spacing:2px;white-space:nowrap;text-shadow:0 0 12px rgba(51,214,255,.9)}
 body.live #orb{box-shadow:0 0 0 2px var(--cyan),0 0 60px rgba(51,214,255,.5),inset 0 0 40px rgba(51,214,255,.25)}
 body.live #orb .core{opacity:.95}
 body.live #stage .halo{opacity:1}
@@ -171,7 +171,7 @@ li.done .chk{background:var(--cyan2)}
         <circle class="r3" cx="150" cy="150" r="108"/>
         <g class="ticks"></g>
       </svg>
-      <button id="orb" aria-label="Call Dan or hang up"><div class="ring"></div><div class="core"></div><div class="lbl" id="orbLbl">CALL</div></button>
+      <button id="orb" aria-label="Call Dan or hang up"><div class="ring"></div><div class="core"></div><div class="lbl" id="orbLbl">DAN 2.0</div></button>
     </div>
     <div id="status">Tap to call Dan</div>
     <div id="caption"><span id="capWho"></span><span id="capText"></span></div>
@@ -233,6 +233,8 @@ li.done .chk{background:var(--cyan2)}
 
   <section id="docs" class="view">
     <h2>Documents Dan wrote</h2>
+    <p class="hint" id="otjInfo"></p>
+    <button class="btn" id="otjAll" style="margin-bottom:10px">🎓 Full OTJ log as Word</button>
     <p class="hint">Ask Dan to write a letter, policy, report or notes and he saves it here. After every call he also saves call notes. Tap one to email, share or open it in Word.</p>
     <ul class="items" id="wList"></ul>
   </section>
@@ -338,6 +340,7 @@ async function loadAll(){
   S.profile = await DB.get("profile", "");
   S.lessons = await DB.get("lessons", []);
   S.study = await DB.get("study", { unit:"3CO01", topics:[] });
+  S.otj = await DB.get("otj", []);
   if (S.settings.autoNotes === undefined) S.settings.autoNotes = true;
   if (!S.settings.model) S.settings.model = "gemini-flash-latest";
   if (!S.settings.rate) S.settings.rate = 1.05;
@@ -752,6 +755,8 @@ Use your tools silently (never say you're calling a tool):
 - draft_message: when asked to text or message someone; then say it's ready to send.
 - Google Search: use it for anything current or that you're unsure of: news, recent law changes, prices, weather, opening times, sports, companies. Mention the source briefly in speech ("according to the BBC", "gov.uk says"). For UK employment law, prefer gov.uk, legislation.gov.uk and ACAS.
 - Vision: when ${S.settings.name || "the user"} turns the camera on, you can see what they point it at: labels, temperature logs, paperwork, equipment, screens. Describe what matters and help, like you're stood next to them. If the image is unclear, ask them to move closer or hold still.
+- OTJ hours: when ${S.settings.name || "the user"} tells you about off-the-job training (study, workshops, webinars, shadowing, mentoring, e-learning, assignment writing, practical training), make sure you have the date, duration and what they did; ask briefly for anything missing (plus, if natural, what they learned and how they'll use it). Then call log_otj_hours with a detailed, professional FIRST-PERSON write-up based only on what they told you – never invent activities, hours or outcomes. Say it's logged, give the new running total, and that the Word file is ready for Smart Assessor. Current OTJ total: ${otjTotal().toFixed(2).replace(/\.?0+$/, "")} hours. "Give me my OTJ summary" → otj_summary.
+- "Make a note to a Word document" / "put that in a Word doc": call create_document with a DETAILED, well-organised write-up of everything they said (title, date, headings with # and ##, bullet points with -, tables with | where useful), capturing all specifics (names, numbers, times, decisions, actions with owners and dates). Don't add facts they didn't say. Then say the Word document is ready.
 - create_document: when asked to write or create any document, letter, policy, report or notes; write it in full; then say briefly it's saved in Docs (don't read it all out).
 - create_spreadsheet: when asked for a spreadsheet, Excel, tracker, rota, log or budget; build it properly with clear headers, sensible example rows if needed, and formulas for totals.
 - create_presentation: when asked for a PowerPoint, slides or presentation; 5 to 12 slides with short punchy bullets and speaker notes.
@@ -770,6 +775,15 @@ const LIVE_TOOLS = [{ functionDeclarations: [
   { name:"complete_task", description:"Mark an open task as done", parameters:{ type:"OBJECT", properties:{ text:{ type:"STRING" } }, required:["text"] } },
   { name:"search_documents", description:"Search the user's loaded knowledge files (employment law, food manufacturing, policies, SOPs)", parameters:{ type:"OBJECT", properties:{ query:{ type:"STRING" } }, required:["query"] } },
   { name:"draft_message", description:"Draft a text message for the user to send", parameters:{ type:"OBJECT", properties:{ to:{ type:"STRING" }, body:{ type:"STRING" } }, required:["body"] } },
+  { name:"log_otj_hours", description:"Log off-the-job (OTJ) training hours for the user's apprenticeship and create a detailed Word document for Smart Assessor. Ask for any missing essentials (date, duration, what they did) before calling.", parameters:{ type:"OBJECT", properties:{
+      date:{ type:"STRING", description:"e.g. 27 Oct 2026" }, iso:{ type:"STRING", description:"YYYY-MM-DD" }, time:{ type:"STRING", description:"e.g. 09:00–11:30, or empty" }, hours:{ type:"STRING", description:"duration in hours, e.g. 2.5" },
+      type:{ type:"STRING", description:"e.g. Study / research, Workshop or webinar, Shadowing, Mentoring, E-learning, Writing assignments, Practical training, Industry visit" },
+      unit:{ type:"STRING", description:"e.g. CIPD Level 3 – 3CO01" },
+      summary:{ type:"STRING", description:"a detailed first-person summary (120-250 words) of the activity based ONLY on what the user said" },
+      what:{ type:"STRING", description:"what they did, step by step, first person" }, learned:{ type:"STRING", description:"what they learned, first person" },
+      ksbs:{ type:"STRING", description:"knowledge, skills, behaviours or assessment criteria it relates to (only those that genuinely fit)" },
+      apply:{ type:"STRING", description:"how they'll apply it at work, first person" }, evidence:{ type:"STRING", description:"supporting evidence if any" } }, required:["date","hours","summary"] } },
+  { name:"otj_summary", description:"Create a Word document of the full OTJ hours log with totals, for Smart Assessor", parameters:{ type:"OBJECT", properties:{} } },
   { name:"create_document", description:"Write and save a full document (letter, policy, report, notes, checklist, procedure) to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, content:{ type:"STRING", description:"the complete document text, well structured with headings" } }, required:["title","content"] } },
   { name:"create_spreadsheet", description:"Create an Excel spreadsheet (tracker, rota, log, budget, checklist, table) saved to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, csv:{ type:"STRING", description:"CSV with a header row. Formulas allowed, e.g. =SUM(B2:B10). For more sheets put a line '### Sheet: Name' before each sheet's CSV." } }, required:["title","csv"] } },
   { name:"create_presentation", description:"Create a PowerPoint presentation saved to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, slides:{ type:"ARRAY", items:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, bullets:{ type:"ARRAY", items:{ type:"STRING" } }, notes:{ type:"STRING" } }, required:["title"] } } }, required:["title","slides"] } },
@@ -795,6 +809,8 @@ function runTool(name, a){
     else if (name === "add_task") applyActions({ add_tasks:[{ text:a.text, due:a.due || "" }] });
     else if (name === "complete_task") applyActions({ complete_tasks:[a.text] });
     else if (name === "draft_message") applyActions({ message:{ to:a.to || "", body:a.body } });
+    else if (name === "log_otj_hours") return logOtj(a);
+    else if (name === "otj_summary") { const d = saveWritten("OTJ hours log – total " + otjTotal().toFixed(2).replace(/\.?0+$/, "") + " h – " + ukDate(Date.now()), otjLogText(), "otj"); showDocCard(d); return { result:"Word document ready", total_hours:otjTotal() }; }
     else if (name === "create_document") applyActions({ document:{ title:a.title, content:a.content } });
     else if (name === "create_spreadsheet") applyActions({ spreadsheet:{ title:a.title, csv:a.csv } });
     else if (name === "create_presentation") applyActions({ presentation:{ title:a.title, slides:a.slides } });
@@ -983,7 +999,7 @@ $("flipBtn").onclick = () => { if (cam) camOn(cam.facing === "environment" ? "us
 function stopLive(){
   camOff(); $("camBtn").disabled = true;
   live = false;
-  document.body.classList.remove("live"); $("orbLbl").textContent = "CALL";
+  document.body.classList.remove("live"); $("orbLbl").textContent = "DAN 2.0";
   if (L) {
     commitBubble("me"); commitBubble("dan"); stopPlayback();
     const l = L; L = null;
@@ -1270,7 +1286,7 @@ function renderDocs(){
 function renderHistory(){
   $("log").innerHTML = "";
   S.history.slice(-40).forEach(h => addLog(h.role === "dan" ? "dan" : "me", h.text));
-  if (!S.history.length) addLog("sys", "Tap CALL to talk to Dan. Talk freely and interrupt him whenever you like. Tap END to hang up.");
+  if (!S.history.length) addLog("sys", "Tap DAN 2.0 to talk to Dan. Talk freely and interrupt him whenever you like. Tap END to hang up.");
 }
 function fillVoices(){
   const sel = $("sVoice"); const cur = pickVoice();
@@ -1304,7 +1320,7 @@ $("pasteAdd").onclick = async () => { const n = $("pasteName").value.trim() || "
 $("sSave").onclick = () => { S.settings.accent = $("sAccent").value; S.settings.name = $("sName").value.trim(); S.settings.email = $("sEmail").value.trim(); S.settings.persona = $("sPersona").value.trim(); S.settings.autoNotes = $("sNotes").checked; S.settings.location = $("sLoc").checked; if (S.settings.location) refreshLocation(8000); S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); tickClock(); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
 $("sTest").onclick = () => { S.settings.voice = $("sVoice").value; S.settings.rate = Number($("sRate").value); try { synth.cancel(); } catch (e) {} speak("Dan 2.0, at your service."); };
 $("bExport").onclick = () => {
-  const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs.map(d => ({ ...d, vecs:undefined })), written:S.written, followups:S.followups, profile:S.profile, lessons:S.lessons, study:S.study });
+  const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs.map(d => ({ ...d, vecs:undefined })), written:S.written, followups:S.followups, profile:S.profile, lessons:S.lessons, study:S.study, otj:S.otj });
   const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], { type:"application/json" }));
   a.download = "dan2-backup-" + new Date().toISOString().slice(0, 10) + ".json"; document.body.appendChild(a); a.click(); a.remove();
 };
@@ -1313,7 +1329,7 @@ $("bFile").onchange = async (e) => {
   const f = e.target.files[0]; if (!f) return;
   try {
     const d = JSON.parse(await f.text()); if (d.app !== "dan2") throw new Error("Not a Dan 2.0 backup");
-    S.memories = d.memories || []; S.tasks = d.tasks || []; S.history = d.history || []; S.docs = d.docs || []; S.written = d.written || []; S.followups = d.followups || []; S.profile = d.profile || ""; DB.set("profile", S.profile); S.lessons = d.lessons || []; DB.set("lessons", S.lessons); S.study = d.study || S.study; DB.set("study", S.study);
+    S.memories = d.memories || []; S.tasks = d.tasks || []; S.history = d.history || []; S.docs = d.docs || []; S.written = d.written || []; S.followups = d.followups || []; S.profile = d.profile || ""; DB.set("profile", S.profile); S.lessons = d.lessons || []; DB.set("lessons", S.lessons); S.study = d.study || S.study; DB.set("study", S.study); S.otj = d.otj || S.otj || []; DB.set("otj", S.otj);
     S.settings = { ...S.settings, ...(d.settings || {}), key:S.settings.key };
     await Promise.all(["memories","tasks","history","docs","written","followups","settings"].map(save));
     renderAll(); fillSettings(); $("about").textContent = "Backup restored ✓";
@@ -1359,14 +1375,16 @@ function showEmailCard(e){
 function showDocCard(d){
   const c = document.createElement("div"); c.className = "card";
   const office = d.kind === "sheet" || d.kind === "slides";
-  c.innerHTML = `<b>${d.kind === "sheet" ? "Spreadsheet saved to Docs" : d.kind === "slides" ? "Presentation saved to Docs" : "Saved to Docs"}</b><div class="body">${esc(d.title)}</div><div class="row"><button class="btn pri op">Open</button>${office ? '<button class="btn sh">' + (d.kind === "sheet" ? "Open in Excel" : "Open in PowerPoint") + '</button>' : `<a class="btn" href="${mailtoLink("", d.title, d.content)}">Email it</a>`}</div>`;
+  const label = d.kind === "sheet" ? "Open in Excel" : d.kind === "slides" ? "Open in PowerPoint" : "Save Word file";
+  c.innerHTML = `<b>${d.kind === "sheet" ? "Spreadsheet saved to Docs" : d.kind === "slides" ? "Presentation saved to Docs" : d.kind === "otj" ? "🎓 OTJ hours logged – Word document ready" : "📄 Word document ready"}</b><div class="body">${esc(d.title)}</div><div class="row"><button class="btn pri sh">${label}</button><button class="btn op">Open</button>${office ? "" : `<a class="btn" href="${mailtoLink("", d.title, d.content)}">Email text</a>`}</div>`;
   c.querySelector(".op").onclick = () => openViewer(d);
-  if (office) { c.querySelector(".sh").onclick = () => shareDoc(d); needLib(d.kind === "sheet" ? "xlsx" : "pptx").catch(() => {}); }
+  c.querySelector(".sh").onclick = () => shareDoc(d);
+  if (office) needLib(d.kind === "sheet" ? "xlsx" : "pptx").catch(() => {}); else if (!window.JSZip) loadScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js").catch(() => {});
   $("log").appendChild(c); $("log").scrollTop = 1e9;
 }
 let vDoc = null;
 function openViewer(d){ vDoc = d; $("vTitle").textContent = d.title; $("vBody").value = d.content; $("viewer").style.display = "flex";
-  $("vShare").textContent = d.kind === "sheet" ? "Open in Excel / Share" : d.kind === "slides" ? "Open in PowerPoint / Share" : "Share / Word";
+  $("vShare").textContent = d.kind === "sheet" ? "Open in Excel / Share" : d.kind === "slides" ? "Open in PowerPoint / Share" : "Save Word file"; needLib("xlsx").catch(() => {}); if (!window.JSZip) loadScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js").catch(() => {});
   $("vEmail").textContent = (d.kind === "sheet" || d.kind === "slides") ? "Email file" : "Email";
   if (d.kind === "sheet") needLib("xlsx").catch(() => {}); if (d.kind === "slides") needLib("pptx").catch(() => {}); }
 function closeViewer(){ if (vDoc && $("vBody").value !== vDoc.content) { vDoc.content = $("vBody").value; save("written"); } $("viewer").style.display = "none"; vDoc = null; renderWritten(); }
@@ -1440,11 +1458,115 @@ async function pptxBlob(d){
   });
   return await p.write({ outputType:"blob" });
 }
+/* ---------- Real Word (.docx) export ---------- */
+function xmlEsc(t){ return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+function runsXml(text){ // supports **bold**
+  return String(text).split(/(\*\*[^*]+\*\*)/).filter(Boolean).map(seg => {
+    const b = /^\*\*[^*]+\*\*$/.test(seg); const t = b ? seg.slice(2, -2) : seg;
+    return `<w:r>${b ? "<w:rPr><w:b/></w:rPr>" : ""}<w:t xml:space="preserve">${xmlEsc(t)}</w:t></w:r>`;
+  }).join("");
+}
+function para(text, style, extra){ return `<w:p><w:pPr>${style ? `<w:pStyle w:val="${style}"/>` : ""}${extra || ""}</w:pPr>${runsXml(text)}</w:p>`; }
+function tableXml(rows){
+  const cols = Math.max(...rows.map(r => r.length));
+  const tr = rows.map((r, i) => `<w:tr>${Array.from({ length:cols }, (_, c) => `<w:tc><w:tcPr><w:tcW w:w="${Math.floor(9000 / cols)}" w:type="dxa"/>${i === 0 ? '<w:shd w:val="clear" w:color="auto" w:fill="DCEBF5"/>' : ""}</w:tcPr><w:p>${i === 0 ? `<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">${xmlEsc(r[c] || "")}</w:t></w:r>` : runsXml(r[c] || "")}</w:p></w:tc>`).join("")}</w:tr>`).join("");
+  return `<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="0" w:type="auto"/><w:tblBorders>${["top","left","bottom","right","insideH","insideV"].map(s => `<w:${s} w:val="single" w:sz="4" w:space="0" w:color="9AA9B8"/>`).join("")}</w:tblBorders></w:tblPr>${tr}</w:tbl><w:p/>`;
+}
+function bodyXml(d){
+  const out = [para(d.title, "Title")];
+  const lines = String(d.content || "").replace(/\r/g, "").split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i], t = l.trim();
+    if (!t) continue;
+    if (/\|/.test(t) && (t.match(/\|/g) || []).length >= 2 && i + 1 < lines.length && /\|/.test(lines[i + 1])) { // table block
+      const rows = []; while (i < lines.length && /\|/.test(lines[i])) { const cells = lines[i].trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim()); if (!cells.every(c => /^:?-{2,}:?$/.test(c))) rows.push(cells); i++; } i--;
+      out.push(tableXml(rows)); continue;
+    }
+    if (/^###\s+/.test(t)) out.push(para(t.replace(/^###\s+/, ""), "Heading3"));
+    else if (/^##\s+/.test(t)) out.push(para(t.replace(/^##\s+/, ""), "Heading2"));
+    else if (/^#\s+/.test(t)) out.push(para(t.replace(/^#\s+/, ""), "Heading1"));
+    else if (/^[A-Z][A-Z0-9 &'’()\/,–-]{3,60}:?$/.test(t) && t === t.toUpperCase()) out.push(para(t.replace(/:$/, "").replace(/\b\w+/g, w => w[0] + w.slice(1).toLowerCase()), "Heading1"));
+    else if (/^[-•*]\s+/.test(t)) out.push(para("• " + t.replace(/^[-•*]\s+/, ""), "ListParagraph", '<w:ind w:left="567" w:hanging="283"/>'));
+    else if (/^\d+[.)]\s+/.test(t)) out.push(para(t, "ListParagraph", '<w:ind w:left="567" w:hanging="340"/>'));
+    else out.push(para(t));
+  }
+  return out.join("");
+}
+async function docxBlob(d){
+  if (!window.JSZip) await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js");
+  const z = new JSZip();
+  z.file("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>`);
+  z.file("_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>`);
+  z.file("docProps/core.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${xmlEsc(d.title)}</dc:title><dc:creator>${xmlEsc(S.settings.name || "Dan 2.0")}</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${new Date().toISOString().slice(0, 19)}Z</dcterms:created></cp:coreProperties>`);
+  z.file("word/_rels/document.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`);
+  const st = (id, name, sz, color, extra) => `<w:style w:type="paragraph" w:styleId="${id}"><w:name w:val="${name}"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:before="${extra || 240}" w:after="80"/></w:pPr><w:rPr><w:b/><w:color w:val="${color}"/><w:sz w:val="${sz}"/></w:rPr></w:style>`;
+  z.file("word/styles.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/><w:sz w:val="22"/><w:lang w:val="en-GB"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="120" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>${st("Title", "Title", 36, "0B1F33", 0)}${st("Heading1", "heading 1", 28, "0E6E95")}${st("Heading2", "heading 2", 24, "0E6E95")}${st("Heading3", "heading 3", 22, "334155")}<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="60"/></w:pPr></w:style><w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/><w:tblPr><w:tblCellMar><w:left w:w="100" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>`);
+  z.file("word/document.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${bodyXml(d)}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr></w:body></w:document>`);
+  return await z.generateAsync({ type:"blob", mimeType:"application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+}
+/* ---------- OTJ (off-the-job) hours ---------- */
+function otjTotal(){ return (S.otj || []).reduce((n, e) => n + (parseFloat(e.hours) || 0), 0); }
+function otjDocText(e){
+  const tot = otjTotal();
+  return `Learner: ${S.settings.name || ""}
+Date: ${e.date}
+Time: ${e.time || "Not recorded"}
+Duration: ${e.hours} hours
+Activity type: ${e.type || "Not specified"}
+Programme / unit: ${e.unit || "CIPD Level 3"}
+
+# Activity summary
+${e.summary}
+
+# What I did
+${e.what || e.summary}
+
+# What I learned
+${e.learned || "To be added"}
+
+# Knowledge, skills and behaviours (KSBs) / criteria covered
+${e.ksbs || "To be confirmed with assessor"}
+
+# How I will apply this at work
+${e.apply || "To be added"}
+
+# Evidence
+${e.evidence || "This log, plus any notes or certificates attached separately"}
+
+# Running total
+Off-the-job hours logged with Dan to date: ${tot.toFixed(2).replace(/\.?0+$/, "")} hours (${(S.otj || []).length} entries).
+
+Learner signature: ______________________   Date: __________`;
+}
+function otjLogText(){
+  const rows = (S.otj || []).slice().sort((a, b) => (a.iso || "").localeCompare(b.iso || ""));
+  return `Learner: ${S.settings.name || ""}
+Total off-the-job hours: ${otjTotal().toFixed(2).replace(/\.?0+$/, "")} hours across ${rows.length} activities.
+
+# Log
+| Date | Hours | Type | Activity | KSBs / criteria |
+|---|---|---|---|---|
+${rows.map(e => `| ${e.date} | ${e.hours} | ${e.type || ""} | ${(e.summary || "").replace(/\|/g, "/").slice(0, 180)} | ${(e.ksbs || "").replace(/\|/g, "/").slice(0, 120)} |`).join("\n")}
+
+# Detail
+${rows.map(e => `## ${e.date} – ${e.type || "Activity"} (${e.hours} h)\n${e.summary}\nLearned: ${e.learned || "-"}\nApply: ${e.apply || "-"}`).join("\n\n")}`;
+}
+function logOtj(a){
+  S.otj = S.otj || [];
+  const e = { id:uid(), date:a.date || ukDate(Date.now()), iso:a.iso || "", time:a.time || "", hours:String(a.hours || "").replace(/[^\d.]/g, "") || "0", type:a.type || "", unit:a.unit || "", summary:a.summary || "", what:a.what || "", learned:a.learned || "", ksbs:a.ksbs || "", apply:a.apply || "", evidence:a.evidence || "", at:Date.now() };
+  S.otj.push(e); DB.set("otj", S.otj);
+  const d = saveWritten(`OTJ log – ${e.date} – ${e.type || "activity"} (${e.hours} h)`, otjDocText(e), "otj");
+  showDocCard(d); renderOtj();
+  return { result:"Logged", total_hours:otjTotal(), document:"Word file ready in Docs" };
+}
+function renderOtj(){ const el = $("otjInfo"); if (el) el.textContent = `Off-the-job hours logged: ${otjTotal().toFixed(2).replace(/\.?0+$/, "")} h across ${(S.otj || []).length} activities.`; }
+
 async function fileFor(d){
-  const base = d.title.replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || "Document";
+  const base = d.title.replace(/[^\w\-. ]+/g, "").trim().slice(0, 60) || "Document";
   if (d.kind === "sheet") return new File([await xlsxBlob(d)], base + ".xlsx", { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
   if (d.kind === "slides") return new File([await pptxBlob(d)], base + ".pptx", { type:"application/vnd.openxmlformats-officedocument.presentationml.presentation" });
-  return new File([wordBlob(d)], base + ".doc", { type:"application/msword" });
+  try { return new File([await docxBlob(d)], base + ".docx", { type:"application/vnd.openxmlformats-officedocument.wordprocessingml.document" }); }
+  catch (e) { return new File([wordBlob(d)], base + ".doc", { type:"application/msword" }); }
 }
 async function shareDoc(d){
   let file; try { file = await fileFor(d); } catch (e) { alertBox("Couldn't build the file: " + e.message); return; }
@@ -1457,7 +1579,7 @@ function renderWritten(){
   if (!S.written.length) ul.innerHTML = '<li><span class="t" style="color:var(--dim)">Nothing yet. Try: "Dan, write me an invite letter for a disciplinary meeting", "make me an Excel training tracker" or "do me a 6-slide PowerPoint on allergen awareness".</span></li>';
   S.written.forEach(d => {
     const li = document.createElement("li"); li.style.cursor = "pointer";
-    li.innerHTML = `<span class="t">${({ notes:"📝 ", sheet:"📊 ", slides:"📽️ " })[d.kind] || "📄 "}${esc(d.title)}<small>${ukDate(d.at)} · ${d.kind === "sheet" ? "Excel" : d.kind === "slides" ? "PowerPoint · " + slidesFromText(d.content).length + " slides" : Math.max(1, Math.round(d.content.split(/\s+/).length)) + " words"}</small></span><span style="color:var(--dim)">›</span>`;
+    li.innerHTML = `<span class="t">${({ notes:"📝 ", sheet:"📊 ", slides:"📽️ ", otj:"🎓 " })[d.kind] || "📄 "}${esc(d.title)}<small>${ukDate(d.at)} · ${d.kind === "sheet" ? "Excel" : d.kind === "slides" ? "PowerPoint · " + slidesFromText(d.content).length + " slides" : Math.max(1, Math.round(d.content.split(/\s+/).length)) + " words"}</small></span><span style="color:var(--dim)">›</span>`;
     li.onclick = () => openViewer(d); ul.appendChild(li);
   });
 }
@@ -1484,6 +1606,7 @@ async function makeCallNotes(turns, started){
   $("log").appendChild(c); $("log").scrollTop = 1e9;
 }
 $("vClose").onclick = closeViewer;
+$("otjAll").onclick = () => { const d = saveWritten("OTJ hours log – total " + otjTotal().toFixed(2).replace(/\.?0+$/, "") + " h – " + ukDate(Date.now()), otjLogText(), "otj"); openViewer(d); };
 $("vEmail").onclick = () => { if (!vDoc) return; vDoc.content = $("vBody").value; save("written"); if (vDoc.kind === "sheet" || vDoc.kind === "slides") { shareDoc(vDoc); return; } location.href = mailtoLink("", vDoc.title, vDoc.content); };
 $("vShare").onclick = () => { if (!vDoc) return; vDoc.content = $("vBody").value; save("written"); shareDoc(vDoc); };
 $("vCopy").onclick = async () => { try { await navigator.clipboard.writeText($("vBody").value); $("vCopy").textContent = "Copied ✓"; } catch (e) { $("vCopy").textContent = "Couldn't copy"; } setTimeout(() => $("vCopy").textContent = "Copy", 1500); };
@@ -1738,7 +1861,7 @@ async function healthCheck(){
 }
 $("hcRun").onclick = healthCheck;
 
-function renderAll(){ renderHistory(); renderTasks(); renderMem(); renderDocs(); renderWritten(); renderFollowups(); renderLessons(); renderStudy(); }
+function renderAll(){ renderHistory(); renderTasks(); renderMem(); renderDocs(); renderWritten(); renderFollowups(); renderLessons(); renderStudy(); renderOtj(); }
 function netStatus(){ $("net").textContent = navigator.onLine ? "● online" : "○ offline"; $("net").style.color = navigator.onLine ? "var(--green)" : "var(--red)"; }
 window.addEventListener("online", netStatus); window.addEventListener("offline", netStatus);
 document.addEventListener("visibilitychange", () => { if (document.hidden && live) stopLive(); });
@@ -1776,7 +1899,7 @@ new MutationObserver(muts => {
     if (!(n instanceof HTMLElement)) return;
     const open = $("sheet").classList.contains("on");
     if (n.classList.contains("card")) { if (!open) { $("badge").classList.add("on"); toast((n.querySelector("b") || {}).textContent + " – tap to view"); } }
-    else if (n.classList.contains("sys") && n.textContent && !/^Tap CALL/.test(n.textContent)) { if (!open) toast(n.textContent.slice(0, 90)); }
+    else if (n.classList.contains("sys") && n.textContent && !/^Tap DAN 2.0/.test(n.textContent)) { if (!open) toast(n.textContent.slice(0, 90)); }
   }));
 }).observe($("log"), { childList:true });
 new MutationObserver(() => {
