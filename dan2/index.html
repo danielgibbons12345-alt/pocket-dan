@@ -206,6 +206,9 @@ li.done .chk{background:var(--cyan2)}
     <div class="row" style="margin-bottom:12px"><input id="memIn" placeholder="Add a memory" style="flex:1"><button class="btn pri" id="memAdd">Add</button></div>
     <h2 style="margin-top:4px">Dan's profile of you</h2>
     <p class="hint" id="profileBox" style="white-space:pre-wrap;color:var(--text)"></p>
+    <h2>Lessons Dan has learned</h2>
+    <p class="hint">Corrections you've given him. These override everything else he knows.</p>
+    <ul class="items" id="lessonList"></ul>
     <h2>Facts</h2>
     <ul class="items" id="memList"></ul>
   </section>
@@ -213,7 +216,7 @@ li.done .chk{background:var(--cyan2)}
   <section id="files" class="view">
     <h2>Knowledge files</h2>
     <p class="hint">Add PDFs, Word (.docx) or text files, such as ACAS guides, legislation, HACCP plans or SOPs. Dan searches them when he answers and says which file he used.</p>
-    <input type="file" id="fileIn" accept=".pdf,.docx,.txt,.md,.csv,application/pdf,text/plain" multiple style="display:none">
+    <input type="file" id="fileIn" accept=".pdf,.docx,.txt,.md,.csv,application/pdf,text/plain,image/*" multiple style="display:none">
     <button class="btn pri" id="fileBtn" style="width:100%;padding:14px">+ Add files</button>
     <div class="err" id="fileErr" style="color:var(--dim)"></div>
     <h2>Or paste text</h2>
@@ -324,6 +327,7 @@ async function loadAll(){
   S.calendar = await DB.get("calendar", null);
   S.followups = await DB.get("followups", []);
   S.profile = await DB.get("profile", "");
+  S.lessons = await DB.get("lessons", []);
   if (S.settings.autoNotes === undefined) S.settings.autoNotes = true;
   if (!S.settings.model) S.settings.model = "gemini-flash-latest";
   if (!S.settings.rate) S.settings.rate = 1.05;
@@ -413,6 +417,9 @@ ${mems}
 ${name}'s open tasks:
 ${open}
 
+CORRECTIONS AND LESSONS FROM ${name} (always follow these; they override your general knowledge and library):
+${(S.lessons || []).map(l => "- " + l.text).join("\n") || "(none yet)"}
+
 Profile of ${name} (your own running summary of who they are, their work, people and ongoing matters):
 ${S.profile || "(not built yet)"}
 
@@ -445,6 +452,7 @@ How to reply:
   "message": {"to": "who", "body": "the text written as ${name} would send it"} (only when ${name} asks you to send or draft a message; say out loud that it's ready to send),
   "document": {"title": "...", "content": "the full document"} (when asked to write/create a document, letter, policy, report, notes; write it in full, properly structured; say out loud it's saved in Docs and keep the spoken part short),
   "email": {"to": "address or empty for ${name}'s own email", "subject": "...", "body": "..."} (when asked to email something; say out loud it's ready to send),
+  "lessons": ["a correction or site-specific fact the user just taught you"] (save whenever corrected),
   "followups": [{"text": "what to ask about later", "after": "optional date"}] (save things to follow up on, without being asked),
   "resolve_followups": ["exact text of follow-ups now dealt with"],
   "directions": {"destination": "...", "mode": "transit|walking|driving", "note": ""} (for travel questions, after giving the times you found with search),
@@ -460,7 +468,7 @@ let noThinking = true, textSearch = true;
 
 // Streams Dan's answer. onSpeech(sentence) is called as soon as each sentence is ready.
 async function askDan(userText, signal, onSpeech){
-  const hits = searchDocs(userText + " " + S.history.slice(-2).map(h => h.text).join(" "));
+  const hits = await smartSearch(userText + " " + S.history.slice(-2).map(h => h.text).join(" "), 5);
   let context = "";
   if (hits.length) context = "\n\n[Relevant extracts from knowledge files]\n" + hits.map(h => `--- ${h.doc} ---\n${h.text}`).join("\n\n");
   const recent = S.history.slice(-24);
@@ -559,6 +567,9 @@ function applyActions(out){
   (out.followups || []).forEach(f => { if (!f || !f.text) return; if (S.followups.some(x => !x.done && x.text.toLowerCase() === f.text.toLowerCase())) return; S.followups.push({ id:uid(), text:f.text.trim(), after:(f.after || "").trim(), at:Date.now(), done:false }); fch = true; });
   (out.resolve_followups || []).forEach(t => { const tl = (t || "").toLowerCase().trim(); if (!tl) return; const f = S.followups.find(x => !x.done && (x.text.toLowerCase() === tl || x.text.toLowerCase().includes(tl) || tl.includes(x.text.toLowerCase()))); if (f) { f.done = true; fch = true; } });
   if (fch) { save("followups"); renderFollowups(); }
+  let lch = false;
+  (out.lessons || []).forEach(t => { t = (t || "").trim(); if (!t || S.lessons.some(l => l.text.toLowerCase() === t.toLowerCase())) return; S.lessons.push({ id:uid(), text:t, at:Date.now() }); lch = true; });
+  if (lch) { DB.set("lessons", S.lessons); renderLessons(); toast("📘 Lesson saved – Dan won't make that mistake again"); }
 }
 
 function showMessageCard(m){
@@ -700,6 +711,9 @@ Use your tools silently (never say you're calling a tool):
 - remember: save new durable facts (always when asked to remember something).
 - forget: remove a memory line when asked or when it's wrong.
 - add_task / complete_task: manage the task list.
+- deep_think: for complex or high-stakes questions (employment law, HR decisions, food safety, machine root causes, calculations, plans) call deep_think instead of answering off the top of your head. Say something natural first ("Give me a second to think that through properly"). Then put its ANSWER into your own words; mention confidence if it's not high, and the checks.
+- save_lesson: whenever the user corrects you or tells you how things are done at their site, save it immediately. Lessons override your general knowledge and library.
+- Self-check: before giving any legal or food safety answer, make sure it's consistent with the lessons, the user's files and the library, and name the source (e.g. "the ACAS Code says…"). If unsure, say so.
 - search_documents: ALWAYS use this before answering anything that could be covered by the loaded knowledge files, and mention which file you used.
 - draft_message: when asked to text or message someone; then say it's ready to send.
 - Google Search: use it for anything current or that you're unsure of: news, recent law changes, prices, weather, opening times, sports, companies. Mention the source briefly in speech ("according to the BBC", "gov.uk says"). For UK employment law, prefer gov.uk, legislation.gov.uk and ACAS.
@@ -725,6 +739,8 @@ const LIVE_TOOLS = [{ functionDeclarations: [
   { name:"create_document", description:"Write and save a full document (letter, policy, report, notes, checklist, procedure) to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, content:{ type:"STRING", description:"the complete document text, well structured with headings" } }, required:["title","content"] } },
   { name:"create_spreadsheet", description:"Create an Excel spreadsheet (tracker, rota, log, budget, checklist, table) saved to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, csv:{ type:"STRING", description:"CSV with a header row. Formulas allowed, e.g. =SUM(B2:B10). For more sheets put a line '### Sheet: Name' before each sheet's CSV." } }, required:["title","csv"] } },
   { name:"create_presentation", description:"Create a PowerPoint presentation saved to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, slides:{ type:"ARRAY", items:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, bullets:{ type:"ARRAY", items:{ type:"STRING" } }, notes:{ type:"STRING" } }, required:["title"] } } }, required:["title","slides"] } },
+  { name:"deep_think", description:"Hand a hard question to Dan's expert reasoning engine (slower, ~5-15s, much more careful). Use for anything complex or high-stakes: employment law situations, HR process decisions, food safety/HACCP judgements, root-cause problems on machines, calculations, plans, or when the user asks you to think harder or double-check.", parameters:{ type:"OBJECT", properties:{ question:{ type:"STRING", description:"the full question, self-contained" }, context:{ type:"STRING", description:"relevant facts from the conversation" } }, required:["question"] } },
+  { name:"save_lesson", description:"Save a correction or lesson from the user so you never repeat the mistake (e.g. site-specific values, preferences on how to do things)", parameters:{ type:"OBJECT", properties:{ lesson:{ type:"STRING", description:"e.g. 'Our CIP caustic is 2% at 75C, not 1.5%'" } }, required:["lesson"] } },
   { name:"add_followup", description:"Save something to follow up with the user about in a later conversation", parameters:{ type:"OBJECT", properties:{ text:{ type:"STRING", description:"what to ask about, e.g. 'Ask if Sam replied about the night-shift rota'" }, after:{ type:"STRING", description:"optional plain date from when to raise it, e.g. Fri 30 Oct" } }, required:["text"] } },
   { name:"resolve_followup", description:"Mark a follow-up as done when it's been dealt with", parameters:{ type:"OBJECT", properties:{ text:{ type:"STRING" } }, required:["text"] } },
   { name:"web_search", description:"Search the web (Google) for anything current: train and bus times, disruptions, news, prices, opening hours, weather, law updates. Returns a short answer with sources.", parameters:{ type:"OBJECT", properties:{ query:{ type:"STRING", description:"a specific search question including places and times, e.g. 'next trains from Worcester Foregate Street to Birmingham New Street after 20:40 tonight'" } }, required:["query"] } },
@@ -753,9 +769,10 @@ function runTool(name, a){
     else if (name === "show_directions") { showDirections(a); return { result:"Directions card shown with live times." }; }
     else if (name === "draft_email") applyActions({ email:{ to:a.to || "", subject:a.subject, body:a.body } });
     else if (name === "search_documents") {
-      const hits = searchDocs(a.query || "", 4);
-      return { results: hits.length ? hits.map(h => ({ file:h.doc, text:h.text.slice(0, 1400) })) : [], note: hits.length ? "" : (S.docs.length ? "No matching passages." : "No knowledge files loaded.") };
+      return smartSearch(a.query || "", 4).then(hits => ({ results: hits.length ? hits.map(h => ({ file:h.doc, text:h.text.slice(0, 1400) })) : [], note: hits.length ? "" : (S.docs.length ? "No matching passages." : "No knowledge files loaded.") }));
     }
+    else if (name === "deep_think") return deepThink(a.question || "", a.context || "").then(r => { setMode("speaking"); return r; });
+    else if (name === "save_lesson") applyActions({ lessons:[a.lesson] });
     return { result:"ok" };
   } catch (e) { return { error:String(e.message || e) }; }
 }
@@ -960,23 +977,127 @@ async function extractDocx(file){
 }
 async function addDoc(name, text){
   const chunks = chunkText(text);
-  if (!chunks.length || text.trim().length < 20) throw new Error(`No readable text found in ${name} (scanned PDFs can't be read).`);
+  if (!chunks.length || text.trim().length < 20) throw new Error(`No readable text found in ${name} (try a clearer scan or photo).`);
   S.docs = S.docs.filter(d => d.name !== name);
   S.docs.push({ id:uid(), name, chunks, chars:text.length, at:Date.now() });
-  await save("docs"); renderDocs();
+  await save("docs"); renderDocs(); indexDocs();
 }
 async function handleFiles(list){
   for (const f of list) {
     try {
       $("fileErr").textContent = "Reading " + f.name + "…";
       let text = "";
-      if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") text = await extractPdf(f);
+      if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") { text = await extractPdf(f); if (text.replace(/\s/g, "").length < 200) { $("fileErr").textContent = "Scanned PDF – Dan is reading it…"; text = await ocrWithGemini(f); } }
       else if (/\.docx$/i.test(f.name)) text = await extractDocx(f);
+      else if (/^image\//.test(f.type) || /\.(jpe?g|png|heic|webp)$/i.test(f.name)) { $("fileErr").textContent = "Reading the photo…"; text = await ocrWithGemini(f); }
       else text = await f.text();
       await addDoc(f.name, text);
       $("fileErr").textContent = "Added " + f.name;
     } catch (e) { $("fileErr").textContent = e.message || String(e); }
   }
+}
+
+/* ============================== Intelligence: semantic search, deep thinking, OCR ============================== */
+const EMB_MODELS = ["gemini-embedding-001", "text-embedding-004"];
+let embModel = null, embBusy = false;
+function cosine(a, b){ let d = 0, na = 0, nb = 0; for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; } return d / (Math.sqrt(na * nb) || 1); }
+async function embedBatch(texts, task){
+  const models = embModel ? [embModel] : EMB_MODELS;
+  for (const m of models) {
+    try {
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:batchEmbedContents`, { method:"POST", headers:{ "Content-Type":"application/json", "x-goog-api-key":S.settings.key },
+        body:JSON.stringify({ requests:texts.map(t => ({ model:"models/" + m, content:{ parts:[{ text:t.slice(0, 6000) }] }, taskType:task, outputDimensionality:768 })) }) });
+      if (!r.ok) continue;
+      const j = await r.json(); const out = (j.embeddings || []).map(e => e.values);
+      if (out.length === texts.length) { embModel = m; return out; }
+    } catch (e) {}
+  }
+  return null;
+}
+// Embed any chunks that don't have vectors yet (runs quietly in the background)
+async function indexDocs(){
+  if (embBusy || !S.settings.key) return; embBusy = true;
+  try {
+    for (const d of S.docs) {
+      if (!d.vecs || d.vecs.length !== d.chunks.length) d.vecs = new Array(d.chunks.length).fill(null);
+      for (let i = 0; i < d.chunks.length; i += 50) {
+        const idx = []; for (let k = i; k < Math.min(i + 50, d.chunks.length); k++) if (!d.vecs[k]) idx.push(k);
+        if (!idx.length) continue;
+        const v = await embedBatch(idx.map(k => d.name + "\n" + d.chunks[k]), "RETRIEVAL_DOCUMENT");
+        if (!v) { embBusy = false; return; }
+        idx.forEach((k, n) => d.vecs[k] = v[n]);
+        await save("docs");
+      }
+    }
+  } finally { embBusy = false; }
+}
+// Hybrid search: meaning (embeddings) + keywords
+async function smartSearch(query, k = 5){
+  const kw = searchDocs(query, 12);
+  let qv = null;
+  if (S.docs.some(d => d.vecs && d.vecs.some(Boolean))) { const v = await embedBatch([query], "RETRIEVAL_QUERY"); qv = v && v[0]; }
+  if (!qv) return kw.slice(0, k);
+  const maxKw = Math.max(1e-6, ...kw.map(h => h.score));
+  const kwMap = new Map(kw.map(h => [h.doc + "#" + h.i, h.score / maxKw]));
+  const all = [];
+  S.docs.forEach(d => d.chunks.forEach((c, i) => {
+    const sem = d.vecs && d.vecs[i] ? cosine(qv, d.vecs[i]) : 0;
+    const kws = kwMap.get(d.name + "#" + i) || 0;
+    all.push({ doc:d.name, i, text:c, score: sem * 0.75 + kws * 0.25 });
+  }));
+  return all.sort((a, b) => b.score - a.score).slice(0, k);
+}
+// Think-harder: reasoning model + web search + files + lessons, with self-check
+async function deepThink(question, context){
+  setStatus("Thinking it through…"); setMode("thinking");
+  const hits = await smartSearch(question + " " + (context || ""), 6);
+  const lessons = (S.lessons || []).map(l => "- " + l.text).join("\n") || "(none)";
+  const prompt = `You are the expert reasoning engine behind Dan 2.0, a personal assistant to ${S.settings.name || "the user"} (UK; works in HR and food manufacturing). Think carefully, then give the answer Dan will say out loud.
+QUESTION: ${question}
+CONTEXT FROM THE CALL: ${context || "(none)"}
+USER PROFILE: ${S.profile || "(none)"}
+CORRECTIONS AND LESSONS FROM THE USER (these override everything else): 
+${lessons}
+RELEVANT EXTRACTS FROM THE USER'S FILES:
+${hits.map(h => "--- " + h.doc + " ---\n" + h.text).join("\n\n") || "(none)"}
+Current UK date/time: ${ukNow()}.
+Method: 1) Work out what is really being asked. 2) Use the files and lessons first, then search the web for current UK law, guidance or facts (prefer legislation.gov.uk, gov.uk, ACAS, FSA, HSE, BRCGS, manufacturer sources). 3) Reason step by step. 4) SELF-CHECK: re-read your answer against the files, lessons and sources; fix anything inconsistent; note anything uncertain or that may have changed recently.
+Output plain text, no markdown, in this shape:
+ANSWER: (what Dan should say: clear, practical, max 170 words, conversational British English, cite the specific source briefly e.g. "ACAS Code paragraph 9" or "section 98 Employment Rights Act" or "your CIP SOP")
+CONFIDENCE: high / medium / low, and why in one line
+CHECKS: anything to verify or the user should be careful about`;
+  let last = "";
+  for (const model of [S.settings.model || "gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash"]) {
+    for (const withSearch of [true, false]) {
+      try {
+        const body = { contents:[{ role:"user", parts:[{ text:prompt }] }], generationConfig:{ temperature:0.3, maxOutputTokens:8192 } };
+        if (withSearch) body.tools = [{ googleSearch:{} }];
+        const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, { method:"POST", headers:{ "Content-Type":"application/json", "x-goog-api-key":S.settings.key }, body:JSON.stringify(body) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) { last = (j.error && j.error.message) || ("HTTP " + r.status); if (withSearch && /search|tool|grounding/i.test(last)) continue; break; }
+        const c = (j.candidates || [])[0] || {};
+        const text = ((c.content || {}).parts || []).filter(p => !p.thought).map(p => p.text || "").join("").trim();
+        if (!text) continue;
+        const sources = (((c.groundingMetadata || {}).groundingChunks) || []).map(g => g.web && (g.web.title || g.web.uri)).filter(Boolean).slice(0, 6);
+        return { result:text, files_used:[...new Set(hits.slice(0, 4).map(h => h.doc))], web_sources:sources };
+      } catch (e) { last = e.message; }
+    }
+  }
+  return { error:"Deep thinking unavailable right now (" + last + "). Answer as best you can and say you're less certain." };
+}
+// Read scanned PDFs / photos of documents with Gemini vision
+async function ocrWithGemini(file){
+  const buf = await file.arrayBuffer(); if (buf.byteLength > 15 * 1024 * 1024) throw new Error(file.name + " is too big to scan (max about 15 MB).");
+  let bin = ""; const u8 = new Uint8Array(buf); for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  const mime = file.type || (/\.pdf$/i.test(file.name) ? "application/pdf" : "image/jpeg");
+  for (const model of ["gemini-flash-lite-latest", S.settings.model || "gemini-flash-latest"]) {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, { method:"POST", headers:{ "Content-Type":"application/json", "x-goog-api-key":S.settings.key },
+      body:JSON.stringify({ contents:[{ role:"user", parts:[{ inlineData:{ mimeType:mime, data:btoa(bin) } }, { text:"Transcribe ALL the text in this document faithfully, keeping headings, lists and tables (tables as rows with | between cells). Include handwritten entries if legible. Do not summarise or add commentary." }] }], generationConfig:{ temperature:0, maxOutputTokens:30000 } }) });
+    if (!r.ok) continue;
+    const j = await r.json(); const t = (((j.candidates || [])[0] || {}).content || {}).parts?.map(p => p.text || "").join("").trim();
+    if (t) return t;
+  }
+  throw new Error("Couldn't read " + file.name + " – try a clearer photo.");
 }
 
 /* ============================== Rendering ============================== */
@@ -1050,7 +1171,7 @@ $("pasteAdd").onclick = async () => { const n = $("pasteName").value.trim() || "
 $("sSave").onclick = () => { S.settings.name = $("sName").value.trim(); S.settings.email = $("sEmail").value.trim(); S.settings.persona = $("sPersona").value.trim(); S.settings.autoNotes = $("sNotes").checked; S.settings.location = $("sLoc").checked; if (S.settings.location) refreshLocation(8000); S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); tickClock(); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
 $("sTest").onclick = () => { S.settings.voice = $("sVoice").value; S.settings.rate = Number($("sRate").value); try { synth.cancel(); } catch (e) {} speak("Dan 2.0, at your service."); };
 $("bExport").onclick = () => {
-  const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs, written:S.written, followups:S.followups, profile:S.profile });
+  const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs.map(d => ({ ...d, vecs:undefined })), written:S.written, followups:S.followups, profile:S.profile, lessons:S.lessons });
   const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], { type:"application/json" }));
   a.download = "dan2-backup-" + new Date().toISOString().slice(0, 10) + ".json"; document.body.appendChild(a); a.click(); a.remove();
 };
@@ -1059,7 +1180,7 @@ $("bFile").onchange = async (e) => {
   const f = e.target.files[0]; if (!f) return;
   try {
     const d = JSON.parse(await f.text()); if (d.app !== "dan2") throw new Error("Not a Dan 2.0 backup");
-    S.memories = d.memories || []; S.tasks = d.tasks || []; S.history = d.history || []; S.docs = d.docs || []; S.written = d.written || []; S.followups = d.followups || []; S.profile = d.profile || ""; DB.set("profile", S.profile);
+    S.memories = d.memories || []; S.tasks = d.tasks || []; S.history = d.history || []; S.docs = d.docs || []; S.written = d.written || []; S.followups = d.followups || []; S.profile = d.profile || ""; DB.set("profile", S.profile); S.lessons = d.lessons || []; DB.set("lessons", S.lessons);
     S.settings = { ...S.settings, ...(d.settings || {}), key:S.settings.key };
     await Promise.all(["memories","tasks","history","docs","written","followups","settings"].map(save));
     renderAll(); fillSettings(); $("about").textContent = "Backup restored ✓";
@@ -1069,7 +1190,7 @@ $("bFile").onchange = async (e) => {
 $("bClearChat").onclick = () => { if ($("bClearChat").dataset.sure) { S.history = []; save("history"); renderHistory(); $("bClearChat").textContent = "Cleared ✓"; delete $("bClearChat").dataset.sure; } else { $("bClearChat").dataset.sure = 1; $("bClearChat").textContent = "Tap again to confirm"; } };
 $("bWipe").onclick = async () => {
   if (!$("bWipe").dataset.sure) { $("bWipe").dataset.sure = 1; $("bWipe").textContent = "Tap again – deletes all"; return; }
-  S.memories = []; S.tasks = []; S.history = []; S.docs = []; S.written = []; S.followups = []; S.profile = ""; await DB.set("profile", ""); S.settings = { model:"gemini-flash-latest", rate:1 };
+  S.memories = []; S.tasks = []; S.history = []; S.docs = []; S.written = []; S.followups = []; S.profile = ""; await DB.set("profile", ""); S.lessons = []; await DB.set("lessons", []); S.settings = { model:"gemini-flash-latest", rate:1 };
   await Promise.all(["memories","tasks","history","docs","written","followups","settings"].map(save));
   location.reload();
 };
@@ -1353,6 +1474,16 @@ ${transcript || "(none)"}`;
     } catch (e) {}
   }
 }
+function renderLessons(){
+  const ul = $("lessonList"); if (!ul) return; ul.innerHTML = "";
+  if (!(S.lessons || []).length) ul.innerHTML = '<li><span class="t" style="color:var(--dim)">None yet. Correct Dan when he gets something wrong and he\'ll save it here.</span></li>';
+  [...(S.lessons || [])].reverse().forEach(l => {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="t">📘 ${esc(l.text)}<small>${ukDate(l.at)}</small></span><button aria-label="Delete">✕</button>`;
+    li.children[1].onclick = () => { S.lessons = S.lessons.filter(x => x !== l); DB.set("lessons", S.lessons); renderLessons(); };
+    ul.appendChild(li);
+  });
+}
 function renderFollowups(){
   const ul = $("fuList"); if (!ul) return; ul.innerHTML = "";
   const open = S.followups.filter(f => !f.done);
@@ -1365,7 +1496,7 @@ function renderFollowups(){
   });
 }
 
-function renderAll(){ renderHistory(); renderTasks(); renderMem(); renderDocs(); renderWritten(); renderFollowups(); }
+function renderAll(){ renderHistory(); renderTasks(); renderMem(); renderDocs(); renderWritten(); renderFollowups(); renderLessons(); }
 function netStatus(){ $("net").textContent = navigator.onLine ? "● online" : "○ offline"; $("net").style.color = navigator.onLine ? "var(--green)" : "var(--red)"; }
 window.addEventListener("online", netStatus); window.addEventListener("offline", netStatus);
 document.addEventListener("visibilitychange", () => { if (document.hidden && live) stopLive(); });
@@ -1437,6 +1568,7 @@ new MutationObserver(() => {
     }
   } catch (e) {}
   renderAll(); netStatus(); tickClock();
+  setTimeout(indexDocs, 3000);
   if (S.settings.location !== false) { try { const st = navigator.permissions && await navigator.permissions.query({ name:"geolocation" }); if (st && st.state === "granted") refreshLocation(8000); } catch (e) {} }
   if (!S.settings.key) { $("setup").classList.add("on"); $("setName").value = S.settings.name || ""; }
 })();
