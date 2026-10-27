@@ -479,7 +479,7 @@ async function askDan(userText, signal, onSpeech){
   const recent = S.history.slice(-24);
   const contents = recent.map(h => ({ role: h.role === "dan" ? "model" : "user", parts:[{ text:h.text }] }));
   contents.push({ role:"user", parts:[{ text: userText + context }] });
-  const models = [S.settings.model, "gemini-2.5-flash", "gemini-2.5-flash-lite"].filter((m, i, a) => m && a.indexOf(m) === i);
+  const models = [S.settings.model, "gemini-flash-lite-latest", "gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"].filter((m, i, a) => m && a.indexOf(m) === i);
   let lastErr;
   for (const model of models) {
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -721,7 +721,9 @@ function livePrompt(){
   const base = systemPrompt();
   const head = base.slice(0, base.indexOf("How to reply:"));
   const recent = S.history.slice(-14).map(h => (h.role === "dan" ? "Dan: " : "Me: ") + h.text).join("\n");
-  return `VOICE AND ACCENT – TOP PRIORITY: You always speak English with ${accentLine()}. Never slip into an American accent${/American/.test(S.settings.accent || "") ? " (ignore this line: American is requested)" : ""}. Use British vocabulary and spellings in speech ("mobile", "rota", "holiday", "car park", "queue", "brilliant", "cheers"), British pronunciation ("schedule" as SHED-yool, "tomato" as to-MAH-to, "garage" as GA-ridge, "aluminium"), and say dates the British way ("the twenty-ninth of October").
+  return `INTERNET – TOP PRIORITY: You DO have live internet access. For anything current or that you’re not certain of (news, weather, sport, prices, opening times, travel, events, law changes, people in the news, "today"/"latest"/"now" questions) you MUST call web_search (or get_weather for weather) before answering. Never say you can’t browse, can’t access the internet or don’t have real-time information. If a search genuinely fails, say "I couldn’t get that just now" and offer to try again.
+
+VOICE AND ACCENT – TOP PRIORITY: You always speak English with ${accentLine()}. Never slip into an American accent${/American/.test(S.settings.accent || "") ? " (ignore this line: American is requested)" : ""}. Use British vocabulary and spellings in speech ("mobile", "rota", "holiday", "car park", "queue", "brilliant", "cheers"), British pronunciation ("schedule" as SHED-yool, "tomato" as to-MAH-to, "garage" as GA-ridge, "aluminium"), and say dates the British way ("the twenty-ninth of October").
 
 ` + head + `This is a live voice call. Speak in that accent with a warm, relaxed tone, with natural rhythm, pauses and the odd "mm" or "right" like a real person. Sound like a mate who happens to be brilliant, not a butler or a robot. Keep it conversational; ${S.settings.name || "the user"} can interrupt you at any time, so stop and listen when they do. Brief acknowledgements like "mm-hm" or "go on" are fine when they're mid-thought.
 
@@ -762,6 +764,7 @@ const LIVE_TOOLS = [{ functionDeclarations: [
   { name:"save_lesson", description:"Save a correction or lesson from the user so you never repeat the mistake (e.g. site-specific values, preferences on how to do things)", parameters:{ type:"OBJECT", properties:{ lesson:{ type:"STRING", description:"e.g. 'Our CIP caustic is 2% at 75C, not 1.5%'" } }, required:["lesson"] } },
   { name:"add_followup", description:"Save something to follow up with the user about in a later conversation", parameters:{ type:"OBJECT", properties:{ text:{ type:"STRING", description:"what to ask about, e.g. 'Ask if Sam replied about the night-shift rota'" }, after:{ type:"STRING", description:"optional plain date from when to raise it, e.g. Fri 30 Oct" } }, required:["text"] } },
   { name:"resolve_followup", description:"Mark a follow-up as done when it's been dealt with", parameters:{ type:"OBJECT", properties:{ text:{ type:"STRING" } }, required:["text"] } },
+  { name:"get_weather", description:"Live weather now and forecast for the next few days. Leave place empty for the user's current location.", parameters:{ type:"OBJECT", properties:{ place:{ type:"STRING", description:"town or city, or empty for here" } } } },
   { name:"web_search", description:"Search the web (Google) for anything current: train and bus times, disruptions, news, prices, opening hours, weather, law updates. Returns a short answer with sources.", parameters:{ type:"OBJECT", properties:{ query:{ type:"STRING", description:"a specific search question including places and times, e.g. 'next trains from Worcester Foregate Street to Birmingham New Street after 20:40 tonight'" } }, required:["query"] } },
   { name:"get_location", description:"Get the user's current GPS location and area name right now", parameters:{ type:"OBJECT", properties:{} } },
   { name:"show_directions", description:"Show one-tap Waze / Apple Maps / Google Maps directions (Waze for driving) with live times from the user's location", parameters:{ type:"OBJECT", properties:{ destination:{ type:"STRING", description:"place, station, postcode or address" }, mode:{ type:"STRING", description:"transit, walking or driving" }, note:{ type:"STRING", description:"optional short note e.g. next train you found" } }, required:["destination"] } },
@@ -783,6 +786,7 @@ function runTool(name, a){
     else if (name === "add_calendar_event") applyActions({ event:a });
     else if (name === "add_followup") applyActions({ followups:[{ text:a.text, after:a.after || "" }] });
     else if (name === "resolve_followup") applyActions({ resolve_followups:[a.text] });
+    else if (name === "get_weather") { setStatus("Checking the weather…"); return getWeather(a.place || "").then(r => { setStatus("I'm listening…"); return r; }); }
     else if (name === "web_search") { setStatus("Searching the web…"); return webSearch(a.query || "").then(r => { setStatus("I'm listening…"); return r; }); }
     else if (name === "get_location") return refreshLocation(6000).then(g => g ? { location:geoLine(), latitude:g.lat, longitude:g.lon } : { error:"Location unavailable – location may be off for Safari." });
     else if (name === "show_directions") { showDirections(a); return { result:"Directions card shown with live times." }; }
@@ -1500,25 +1504,63 @@ function showDirections(d){
 }
 
 /* ---------- Backup web search (works even when live-call search is off) ---------- */
+const SEARCH_MODELS = ["gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash"];
 async function webSearch(q){
-  const prompt = `You are a research helper for a voice assistant. Search the web and answer the question below accurately and concisely (max 120 words).
+  const prompt = `You are a research helper for a voice assistant. Search the web and answer the question below accurately and concisely (max 120 words), with the key facts first.
 For travel: give the next 3-4 departures with times, operator, platform/stop if known, journey time, and say clearly whether times are LIVE or SCHEDULED; mention cancellations, delays, strikes or engineering works. Use National Rail, Trainline, Realtime Trains, bus operator sites, bustimes.org, Traveline, TfL as sources.
 Current UK date/time: ${ukNow()}. User's location: ${geoLine()}.
 Question: ${q}`;
-  let lastErr = "";
-  for (const model of [S.settings.model || "gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash"]) {
+  let lastErr = "", memoryAnswer = null;
+  const order = [S.settings.searchModel, ...SEARCH_MODELS].filter((m, i, a) => m && a.indexOf(m) === i);
+  for (const model of order) {
     try {
       const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, { method:"POST", headers:{ "Content-Type":"application/json", "x-goog-api-key":S.settings.key },
         body:JSON.stringify({ contents:[{ role:"user", parts:[{ text:prompt }] }], tools:[{ googleSearch:{} }], generationConfig:{ temperature:0.2, maxOutputTokens:900 } }) });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok) { lastErr = (j.error && j.error.message) || ("HTTP " + r.status); if (r.status === 429) continue; continue; }
+      if (!r.ok) { lastErr = model + ": " + ((j.error && j.error.message) || ("HTTP " + r.status)).slice(0, 140); continue; }
       const c = (j.candidates || [])[0] || {};
-      const answer = ((c.content || {}).parts || []).map(p => p.text || "").join("").trim();
-      const sources = (((c.groundingMetadata || {}).groundingChunks) || []).map(g => g.web && (g.web.title || g.web.uri)).filter(Boolean).slice(0, 5);
-      if (answer) return { answer, sources, searched: !!(c.groundingMetadata) };
-    } catch (e) { lastErr = e.message; }
+      const answer = ((c.content || {}).parts || []).filter(p => !p.thought).map(p => p.text || "").join("").trim();
+      const gm = c.groundingMetadata || {};
+      const sources = ((gm.groundingChunks) || []).map(g => g.web && (g.web.title || g.web.uri)).filter(Boolean).slice(0, 5);
+      const searched = !!(sources.length || (gm.webSearchQueries || []).length);
+      if (answer && searched) { if (S.settings.searchModel !== model) { S.settings.searchModel = model; save("settings"); } return { answer, sources, searched:true }; }
+      if (answer && !memoryAnswer) memoryAnswer = answer; // answered without actually searching – keep as last resort
+    } catch (e) { lastErr = model + ": " + e.message; }
   }
-  return { error:"Web search unavailable right now (" + (lastErr || "no response") + "). Suggest the Maps card for live times." };
+  // free backup: Wikipedia (good for general facts, not live info)
+  try {
+    const sr = await (await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&srlimit=1&format=json&origin=*`)).json();
+    const title = (((sr.query || {}).search || [])[0] || {}).title;
+    if (title) {
+      const ex = await (await fetch(`https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&titles=${encodeURIComponent(title)}&format=json&origin=*`)).json();
+      const page = Object.values((ex.query || {}).pages || {})[0] || {};
+      if (page.extract) return { answer:(memoryAnswer ? memoryAnswer + "\n\nWikipedia: " : "") + page.extract.slice(0, 1200), sources:["Wikipedia – " + title], searched:false, note:"Google search wasn't available; this is from Wikipedia (not live news). Tell the user." };
+    }
+  } catch (e) {}
+  if (memoryAnswer) return { answer:memoryAnswer, sources:[], searched:false, note:"Couldn't search live; this is from memory and may be out of date – say so." };
+  const msg = "Web search failed – " + (lastErr || "no response");
+  addLog("sys", "🔎 " + msg + ". Run Settings → Health check for details.");
+  return { error: msg + ". Tell the user briefly and suggest trying again shortly." };
+}
+/* ---------- Free live weather (Open-Meteo, no key needed) ---------- */
+const WMO = { 0:"clear sky", 1:"mainly clear", 2:"partly cloudy", 3:"overcast", 45:"fog", 48:"freezing fog", 51:"light drizzle", 53:"drizzle", 55:"heavy drizzle", 56:"freezing drizzle", 57:"freezing drizzle", 61:"light rain", 63:"rain", 65:"heavy rain", 66:"freezing rain", 67:"freezing rain", 71:"light snow", 73:"snow", 75:"heavy snow", 77:"snow grains", 80:"light showers", 81:"showers", 82:"heavy showers", 85:"snow showers", 86:"heavy snow showers", 95:"thunderstorms", 96:"thunderstorms with hail", 99:"thunderstorms with hail" };
+async function getWeather(place){
+  try {
+    let lat, lon, name;
+    if (place && place.trim()) {
+      const g = await (await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(place)}&count=1&language=en&countryCode=GB`)).json();
+      let hit = (g.results || [])[0];
+      if (!hit) { const g2 = await (await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(place)}&count=1&language=en`)).json(); hit = (g2.results || [])[0]; }
+      if (!hit) return { error:"Couldn't find " + place };
+      lat = hit.latitude; lon = hit.longitude; name = [hit.name, hit.admin1, hit.country_code].filter(Boolean).join(", ");
+    } else { const g = GEO || await refreshLocation(6000); if (!g) return { error:"Location unknown – ask which town." }; lat = g.lat; lon = g.lon; name = g.place || "your location"; }
+    const w = await (await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,precipitation&hourly=temperature_2m,precipitation_probability,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset&timezone=Europe%2FLondon&forecast_days=3&wind_speed_unit=mph`)).json();
+    const cur = w.current || {}, d = w.daily || {}, h = w.hourly || {};
+    const nowIdx = Math.max(0, (h.time || []).findIndex(t => t >= (cur.time || "")));
+    const next = (h.time || []).slice(nowIdx, nowIdx + 12).filter((_, i) => i % 3 === 0).map((t, k) => `${t.slice(11, 16)} ${Math.round(h.temperature_2m[nowIdx + k * 3])}°C ${WMO[h.weather_code[nowIdx + k * 3]] || ""}, rain chance ${h.precipitation_probability[nowIdx + k * 3]}%`);
+    const days = (d.time || []).map((t, i) => `${new Date(t).toLocaleDateString("en-GB", { weekday:"long" })}: ${WMO[d.weather_code[i]] || ""}, ${Math.round(d.temperature_2m_min[i])}–${Math.round(d.temperature_2m_max[i])}°C, rain chance ${d.precipitation_probability_max[i]}%`);
+    return { place:name, now:`${Math.round(cur.temperature_2m)}°C (feels ${Math.round(cur.apparent_temperature)}°C), ${WMO[cur.weather_code] || ""}, wind ${Math.round(cur.wind_speed_10m)} mph`, next_hours:next, next_days:days, source:"Open-Meteo (live forecast)" };
+  } catch (e) { return { error:"Weather service unavailable: " + e.message }; }
 }
 
 /* ---------- Calendar ---------- */
@@ -1631,6 +1673,9 @@ async function healthCheck(){
     };
     tryOne();
   });
+  let r5b = row("Internet search test");
+  { const t = await webSearch("What is one top UK news headline today? One sentence."); r5b(t.searched ? true : t.answer ? "warn" : false, t.searched ? "Working – e.g. " + t.answer.slice(0, 90) + (S.settings.searchModel ? " (via " + S.settings.searchModel + ")" : "") : t.answer ? (t.note || "Answered without live search") : t.error); }
+  let r5c = row("Live weather"); { const w = await getWeather(""); r5c(w.now ? true : false, w.now ? (w.place + ": " + w.now) : w.error); }
   let r5 = row("Web search"); r5(S.settings.liveNoSearch ? "warn" : true, S.settings.liveNoSearch ? "Built-in call search off on your key – Dan uses his backup search instead (works fine)" : "Built-in search available");
   let r6 = row("Microphone");
   try { const st = await navigator.mediaDevices.getUserMedia({ audio:true }); st.getTracks().forEach(t => t.stop()); r6(true, "Allowed"); } catch (e) { r6(false, "Blocked – Settings → Apps → Safari → Microphone → Allow"); }
