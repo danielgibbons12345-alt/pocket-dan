@@ -114,8 +114,8 @@ li.done .chk{background:var(--cyan2)}
     <div id="log"></div>
     <div id="dock">
       <div id="interim"></div>
-      <div id="status">Tap to talk</div>
-      <button id="orb" aria-label="Start or stop conversation"><div class="ring"></div><div class="core"></div><div class="lbl" id="orbLbl">TALK</div></button>
+      <div id="status">Tap to call Dan</div>
+      <button id="orb" aria-label="Start or stop conversation"><div class="ring"></div><div class="core"></div><div class="lbl" id="orbLbl">CALL</div></button>
       <div id="typebar"><input id="typeIn" placeholder="Or type to Dan…" enterkeyhint="send"><button class="btn" id="typeGo">Send</button></div>
     </div>
   </section>
@@ -153,7 +153,8 @@ li.done .chk{background:var(--cyan2)}
     <div class="field"><label>Your name</label><input id="sName"></div>
     <div class="field"><label>Gemini API key</label><input id="sKey" autocapitalize="off" spellcheck="false"></div>
     <div class="field"><label>Model</label><input id="sModel" autocapitalize="off" spellcheck="false"></div>
-    <div class="field"><label>Voice</label><select id="sVoice"></select></div>
+    <div class="field"><label>Call voice (live calls)</label><select id="sLiveVoice"></select></div>
+    <div class="field"><label>Typed-chat voice (iPhone voices)</label><select id="sVoice"></select></div>
     <div class="field"><label>Speaking speed</label><input type="range" id="sRate" min="0.8" max="1.3" step="0.05"></div>
     <div class="row"><button class="btn pri" id="sSave">Save</button><button class="btn" id="sTest">Test voice</button></div>
     <h2>Backup</h2>
@@ -530,27 +531,190 @@ async function handleUser(text, viaVoice){
   if (live) startListening(); else { setMode("idle"); setStatus("Tap to talk"); }
 }
 
-async function startLive(){
-  live = true; silentRestarts = 0;
-  document.body.classList.add("live"); $("orbLbl").textContent = "STOP";
-  // prime speech synthesis inside the tap (required on iOS)
-  try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; synth && synth.speak(u); } catch (e) {}
-  try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
-  const name = S.settings.name ? ", " + S.settings.name : "";
-  const greet = S.history.length ? `Go ahead${name}.` : `Dan 2.0 online. Good to meet you${name}. What can I do for you?`;
-  if (!S.history.length) { addLog("dan", greet); S.history.push({ role:"dan", text:greet, at:Date.now() }); save("history"); }
-  sqReset(); sqPush(greet); await sqDone();
-  if (live) startListening();
+/* ============================== Live voice (Gemini Live: real-time, interruptible) ============================== */
+const LIVE_MODELS = ["gemini-3.8-live", "gemini-3.1-flash-live-preview", "gemini-2.5-flash-native-audio-preview-09-2025"];
+const LIVE_VOICES = ["Charon", "Orus", "Fenrir", "Iapetus", "Puck", "Algenib", "Schedar"];
+let L = null;
+
+function livePrompt(){
+  const base = systemPrompt();
+  const head = base.slice(0, base.indexOf("How to reply:"));
+  const recent = S.history.slice(-14).map(h => (h.role === "dan" ? "Dan: " : "Me: ") + h.text).join("\n");
+  return head + `This is a live voice call. Speak with a refined, calm British (Received Pronunciation) accent, like a polished English butler. Keep it conversational and brief; ${S.settings.name || "the user"} can interrupt you at any time.
+
+Use your tools silently (never say you're calling a tool):
+- remember: save new durable facts (always when asked to remember something).
+- forget: remove a memory line when asked or when it's wrong.
+- add_task / complete_task: manage the task list.
+- search_documents: ALWAYS use this before answering anything that could be covered by the loaded knowledge files, and mention which file you used.
+- draft_message: when asked to text or message someone; then say it's ready to send.
+${recent ? "\nRecent conversation, for continuity:\n" + recent : ""}`;
 }
+
+const LIVE_TOOLS = [{ functionDeclarations: [
+  { name:"remember", description:"Save a durable fact about the user to long-term memory", parameters:{ type:"OBJECT", properties:{ fact:{ type:"STRING" } }, required:["fact"] } },
+  { name:"forget", description:"Delete a memory line", parameters:{ type:"OBJECT", properties:{ fact:{ type:"STRING" } }, required:["fact"] } },
+  { name:"add_task", description:"Add a task to the user's task list", parameters:{ type:"OBJECT", properties:{ text:{ type:"STRING" }, due:{ type:"STRING", description:"plain date like Fri 30 Oct, or empty" } }, required:["text"] } },
+  { name:"complete_task", description:"Mark an open task as done", parameters:{ type:"OBJECT", properties:{ text:{ type:"STRING" } }, required:["text"] } },
+  { name:"search_documents", description:"Search the user's loaded knowledge files (employment law, food manufacturing, policies, SOPs)", parameters:{ type:"OBJECT", properties:{ query:{ type:"STRING" } }, required:["query"] } },
+  { name:"draft_message", description:"Draft a text message for the user to send", parameters:{ type:"OBJECT", properties:{ to:{ type:"STRING" }, body:{ type:"STRING" } }, required:["body"] } }
+]}];
+
+function runTool(name, a){
+  a = a || {};
+  try {
+    if (name === "remember") applyActions({ remember:[a.fact] });
+    else if (name === "forget") applyActions({ forget:[a.fact] });
+    else if (name === "add_task") applyActions({ add_tasks:[{ text:a.text, due:a.due || "" }] });
+    else if (name === "complete_task") applyActions({ complete_tasks:[a.text] });
+    else if (name === "draft_message") applyActions({ message:{ to:a.to || "", body:a.body } });
+    else if (name === "search_documents") {
+      const hits = searchDocs(a.query || "", 4);
+      return { results: hits.length ? hits.map(h => ({ file:h.doc, text:h.text.slice(0, 1400) })) : [], note: hits.length ? "" : (S.docs.length ? "No matching passages." : "No knowledge files loaded.") };
+    }
+    return { result:"ok" };
+  } catch (e) { return { error:String(e.message || e) }; }
+}
+
+function b64FromInt16(arr){
+  const u8 = new Uint8Array(arr.buffer); let s = "";
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function playPCM(b64, mime){
+  if (!L || !L.ctx) return;
+  const rate = Number((/rate=(\d+)/.exec(mime || "") || [])[1]) || 24000;
+  const bin = atob(b64); const n = bin.length >> 1; if (!n) return;
+  const buf = L.ctx.createBuffer(1, n, rate); const ch = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) { let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8); if (v >= 32768) v -= 65536; ch[i] = v / 32768; }
+  const src = L.ctx.createBufferSource(); src.buffer = buf; src.connect(L.ctx.destination);
+  const t = Math.max(L.ctx.currentTime + 0.02, L.playTime); src.start(t); L.playTime = t + buf.duration;
+  L.sources.add(src); setMode("speaking"); setStatus("Dan's talking – just speak to interrupt");
+  src.onended = () => { if (!L) return; L.sources.delete(src); if (!L.sources.size) { setMode("listening"); setStatus("Listening – just talk"); } };
+}
+function stopPlayback(){ if (!L) return; L.sources.forEach(s => { try { s.stop(); } catch (e) {} }); L.sources.clear(); L.playTime = 0; }
+
+function liveBubble(role, add){
+  const key = role === "me" ? "meB" : "danB", txt = role === "me" ? "meT" : "danT";
+  if (role === "dan") commitBubble("me"); else commitBubble("dan");
+  if (!L[key]) L[key] = addLog(role, "");
+  L[txt] += add; L[key].textContent = L[txt].trim(); $("log").scrollTop = 1e9;
+}
+function commitBubble(role){
+  if (!L) return;
+  const key = role === "me" ? "meB" : "danB", txt = role === "me" ? "meT" : "danT";
+  const t = (L[txt] || "").trim();
+  if (L[key] && t) { S.history.push({ role, text:t, at:Date.now() }); if (S.history.length > 400) S.history = S.history.slice(-400); save("history"); }
+  else if (L[key] && !t) L[key].remove();
+  L[key] = null; L[txt] = "";
+}
+
+function connectLive(mi, isReconnect){
+  if (!live || !L) return;
+  const models = [S.settings.liveModel, ...LIVE_MODELS].filter((m, i, a) => m && a.indexOf(m) === i);
+  if (mi >= models.length) { addLog("sys", "Couldn't start a live call: " + (L.lastErr || "Google refused the connection") + ". Check your key in Settings, or try again later (free daily limit)."); stopLive(); return; }
+  const model = models[mi]; L.ready = false; L.mi = mi;
+  const ws = new WebSocket("wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + encodeURIComponent(S.settings.key));
+  L.ws = ws;
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ setup:{
+      model:"models/" + model,
+      generationConfig:{ responseModalities:["AUDIO"], speechConfig:{ voiceConfig:{ prebuiltVoiceConfig:{ voiceName: S.settings.liveVoice || "Charon" } } } },
+      systemInstruction:{ parts:[{ text: livePrompt() }] },
+      tools: LIVE_TOOLS,
+      inputAudioTranscription:{}, outputAudioTranscription:{},
+      contextWindowCompression:{ slidingWindow:{} }
+    }}));
+  };
+  ws.onmessage = async (ev) => {
+    let m; try { m = JSON.parse(typeof ev.data === "string" ? ev.data : await ev.data.text()); } catch (e) { return; }
+    if (!L || L.ws !== ws) return;
+    if (m.setupComplete) {
+      L.ready = true; S.settings.liveModel = model; save("settings");
+      setMode("listening"); setStatus("Connected – just talk");
+      if (!isReconnect) ws.send(JSON.stringify({ realtimeInput:{ text: S.history.length ? "(Call connected. Greet me in a few words, like picking up the phone.)" : "(First ever call. Introduce yourself briefly as Dan 2.0.)" } }));
+      return;
+    }
+    const sc = m.serverContent;
+    if (sc) {
+      if (sc.interrupted) { stopPlayback(); setMode("listening"); setStatus("Listening – just talk"); }
+      if (sc.inputTranscription && sc.inputTranscription.text) liveBubble("me", sc.inputTranscription.text);
+      if (sc.outputTranscription && sc.outputTranscription.text) liveBubble("dan", sc.outputTranscription.text);
+      ((sc.modelTurn && sc.modelTurn.parts) || []).forEach(p => { if (p.inlineData && /audio/.test(p.inlineData.mimeType || "audio")) playPCM(p.inlineData.data, p.inlineData.mimeType); });
+      if (sc.turnComplete) { commitBubble("me"); commitBubble("dan"); }
+    }
+    if (m.toolCall && m.toolCall.functionCalls) {
+      const functionResponses = m.toolCall.functionCalls.map(fc => ({ id:fc.id, name:fc.name, response: runTool(fc.name, fc.args) }));
+      ws.send(JSON.stringify({ toolResponse:{ functionResponses } }));
+    }
+    if (m.goAway) { L.goingAway = true; }
+  };
+  ws.onerror = () => {};
+  ws.onclose = (ev) => {
+    if (!L || L.ws !== ws || !live) return;
+    if (!L.ready) { L.lastErr = ev.reason || ("connection closed (" + ev.code + ")"); if (/key|auth|permission/i.test(ev.reason || "")) { addLog("sys", "Google refused your key: " + ev.reason); stopLive(); return; } connectLive(mi + 1, isReconnect); return; }
+    // dropped mid-call (sessions have a time limit) → reconnect quietly
+    commitBubble("me"); commitBubble("dan"); stopPlayback();
+    if ((L.reconnects = (L.reconnects || 0) + 1) > 5) { addLog("sys", "Call dropped. Tap to call again."); stopLive(); return; }
+    setStatus("Reconnecting…"); setTimeout(() => connectLive(mi, true), 300);
+  };
+}
+
+async function startLive(){
+  if (live) return;
+  live = true; document.body.classList.add("live"); $("orbLbl").textContent = "END";
+  setMode("thinking"); setStatus("Connecting…");
+  L = { sources:new Set(), playTime:0, meT:"", danT:"", meB:null, danB:null };
+  try { if (navigator.audioSession) navigator.audioSession.type = "play-and-record"; } catch (e) {}
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    L.ctx = new AC(); await L.ctx.resume();
+    L.stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:true, noiseSuppression:true, autoGainControl:true, channelCount:1 } });
+  } catch (e) {
+    addLog("sys", "I need the microphone. Allow it for Safari in Settings → Apps → Safari → Microphone, then try again. (Open Dan in Safari, not inside the Claude app.)");
+    stopLive(); return;
+  }
+  try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
+  const code = `class P extends AudioWorkletProcessor{constructor(){super();this.r=sampleRate/16000;this.pos=0;this.buf=new Int16Array(1600);this.n=0;}
+  process(inp){const x=inp[0]&&inp[0][0];if(!x)return true;let p=this.pos;while(p<x.length){const s=Math.max(-1,Math.min(1,x[p|0]));this.buf[this.n++]=s<0?s*32768:s*32767;if(this.n===this.buf.length){this.port.postMessage(this.buf.slice(0));this.n=0;}p+=this.r;}this.pos=p-x.length;return true;}}
+  registerProcessor('pcm16',P);`;
+  const sendPCM = (i16) => { if (L && L.ready && L.ws && L.ws.readyState === 1) L.ws.send(JSON.stringify({ realtimeInput:{ audio:{ data:b64FromInt16(i16), mimeType:"audio/pcm;rate=16000" } } })); };
+  L.src = L.ctx.createMediaStreamSource(L.stream);
+  const mute = L.ctx.createGain(); mute.gain.value = 0; mute.connect(L.ctx.destination);
+  try {
+    await L.ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([code], { type:"application/javascript" })));
+    L.node = new AudioWorkletNode(L.ctx, "pcm16");
+    L.node.port.onmessage = (e) => sendPCM(e.data);
+  } catch (e) {
+    // fallback for browsers without AudioWorklet support
+    const r = L.ctx.sampleRate / 16000; let pos = 0;
+    L.node = L.ctx.createScriptProcessor(4096, 1, 1);
+    L.node.onaudioprocess = (ev) => {
+      const x = ev.inputBuffer.getChannelData(0); const out = [];
+      let q = pos; while (q < x.length) { const v = Math.max(-1, Math.min(1, x[q | 0])); out.push(v < 0 ? v * 32768 : v * 32767); q += r; } pos = q - x.length;
+      sendPCM(Int16Array.from(out));
+    };
+  }
+  L.src.connect(L.node); L.node.connect(mute);
+  connectLive(0, false);
+}
+
 function stopLive(){
   live = false;
-  document.body.classList.remove("live"); $("orbLbl").textContent = "TALK";
+  document.body.classList.remove("live"); $("orbLbl").textContent = "CALL";
+  if (L) {
+    commitBubble("me"); commitBubble("dan"); stopPlayback();
+    const l = L; L = null;
+    try { l.ws && l.ws.close(); } catch (e) {}
+    try { l.stream && l.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+    try { l.ctx && l.ctx.close(); } catch (e) {}
+  }
   try { rec && rec.abort(); } catch (e) {} rec = null;
   sqStop();
   try { abortCtl && abortCtl.abort(); } catch (e) {}
   try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null;
   busy = false; $("interim").textContent = "";
-  setMode("idle"); setStatus("Tap to talk");
+  setMode("idle"); setStatus("Tap to call Dan");
 }
 
 /* ============================== Files ============================== */
@@ -633,7 +797,7 @@ function renderDocs(){
 function renderHistory(){
   $("log").innerHTML = "";
   S.history.slice(-40).forEach(h => addLog(h.role === "dan" ? "dan" : "me", h.text));
-  if (!S.history.length) addLog("sys", "Tap the button to start talking. Tap again to stop.");
+  if (!S.history.length) addLog("sys", "Tap CALL to talk to Dan. Talk freely and interrupt him whenever you like. Tap END to hang up.");
 }
 function fillVoices(){
   const sel = $("sVoice"); const cur = pickVoice();
@@ -643,7 +807,7 @@ function fillVoices(){
 }
 function fillSettings(){
   $("sName").value = S.settings.name || ""; $("sKey").value = S.settings.key || "";
-  $("sModel").value = S.settings.model; $("sRate").value = S.settings.rate; fillVoices();
+  $("sModel").value = S.settings.model; $("sLiveVoice").innerHTML = LIVE_VOICES.map(v => `<option>${v}</option>`).join(""); $("sLiveVoice").value = S.settings.liveVoice || "Charon"; $("sRate").value = S.settings.rate; fillVoices();
   $("about").textContent = `Dan 2.0 · ${S.memories.length} memories · ${S.tasks.filter(t => !t.done).length} open tasks · ${S.docs.length} files. Everything is stored on this phone only.`;
 }
 
@@ -654,7 +818,7 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   if (b.dataset.v === "settings") fillSettings();
 });
 $("orb").onclick = () => { if (!S.settings.key) { $("setup").classList.add("on"); return; } live ? stopLive() : startLive(); };
-const sendTyped = () => { const v = $("typeIn").value.trim(); if (!v || busy) return; $("typeIn").value = ""; try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; synth && synth.speak(u); } catch (e) {} if (rec) { try { rec.abort(); } catch (e) {} } handleUser(v, live ? true : "speak"); };
+const sendTyped = () => { const v = $("typeIn").value.trim(); if (!v) return; if (live && L && L.ready) { $("typeIn").value = ""; commitBubble("dan"); liveBubble("me", v); commitBubble("me"); L.ws.send(JSON.stringify({ realtimeInput:{ text:v } })); return; } if (busy) return; $("typeIn").value = ""; try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; synth && synth.speak(u); } catch (e) {} if (rec) { try { rec.abort(); } catch (e) {} } handleUser(v, live ? true : "speak"); };
 $("typeGo").onclick = sendTyped;
 $("log").onclick = () => { if (live && document.body.classList.contains("speaking")) { sqStop(); } };
 $("typeIn").onkeydown = (e) => { if (e.key === "Enter") sendTyped(); };
@@ -663,7 +827,7 @@ $("memAdd").onclick = () => { const v = $("memIn").value.trim(); if (!v) return;
 $("fileBtn").onclick = () => $("fileIn").click();
 $("fileIn").onchange = (e) => { handleFiles([...e.target.files]); e.target.value = ""; };
 $("pasteAdd").onclick = async () => { const n = $("pasteName").value.trim() || "Pasted note " + ukDate(Date.now()); const t = $("pasteText").value; try { await addDoc(n, t); $("pasteName").value = ""; $("pasteText").value = ""; $("fileErr").textContent = "Saved " + n; } catch (e) { $("fileErr").textContent = e.message; } };
-$("sSave").onclick = () => { S.settings.name = $("sName").value.trim(); S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
+$("sSave").onclick = () => { S.settings.name = $("sName").value.trim(); S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
 $("sTest").onclick = () => { S.settings.voice = $("sVoice").value; S.settings.rate = Number($("sRate").value); try { synth.cancel(); } catch (e) {} speak("Dan 2.0, at your service."); };
 $("bExport").onclick = () => {
   const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs });
