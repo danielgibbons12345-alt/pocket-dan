@@ -249,6 +249,10 @@ li.done .chk{background:var(--cyan2)}
     <h2>Calendar sync</h2>
     <p class="hint" id="calInfo">Not synced yet.</p>
     <p class="hint">To let Dan see your iPhone Calendar, make a Shortcut called <b>Dan Calendar</b> that opens this page with your events (Claude gave you the steps). Run it whenever you like, or automatically each morning.</p>
+    <h2>Health check</h2>
+    <p class="hint">Tests everything Dan needs and tells you what to fix.</p>
+    <button class="btn pri" id="hcRun">Run health check</button>
+    <ul class="items" id="hcList" style="margin-top:12px"></ul>
     <h2>Backup</h2>
     <p class="hint">Back up Dan's memory, tasks and files now and then, so you can restore them on a new phone.</p>
     <div class="row">
@@ -434,8 +438,7 @@ HOW TO BE INDEPENDENT (act like a proactive chief of staff, not a passive tool)
 
 Knowledge files ${name} has loaded: ${docs}
 
-YOUR BUILT-IN TECHNICAL LIBRARY (use this detail directly; site SOPs and OEM manuals override it):
-${BUILTIN_LIB.filter(b => S.docs.some(d => d.name === b.name)).map(b => b.text).join("\n\n") || "(removed by user)"}
+Your built-in technical library files (search them with search_documents whenever a question touches these topics, before answering): ${BUILTIN_LIB.filter(b => S.docs.some(d => d.name === b.name)).map(b => b.name.replace("Dan library – ", "")).join("; ") || "(removed by user)"}.
 
 ${name}'s current location: ${geoLine()}
 
@@ -823,6 +826,7 @@ function connectLive(mi, isReconnect){
       generationConfig:{ responseModalities:["AUDIO"], speechConfig:{ voiceConfig:{ prebuiltVoiceConfig:{ voiceName: S.settings.liveVoice || "Charon" } } } },
       systemInstruction:{ parts:[{ text: livePrompt() }] },
       tools: L.noSearch ? LIVE_TOOLS : [{ googleSearch:{} }, ...LIVE_TOOLS],
+      sessionResumption: L.resumeHandle ? { handle:L.resumeHandle } : {},
       inputAudioTranscription:{}, outputAudioTranscription:{},
       contextWindowCompression:{ slidingWindow:{} }
     }}));
@@ -831,7 +835,7 @@ function connectLive(mi, isReconnect){
     let m; try { m = JSON.parse(typeof ev.data === "string" ? ev.data : await ev.data.text()); } catch (e) { return; }
     if (!L || L.ws !== ws) return;
     if (m.setupComplete) {
-      L.ready = true; S.settings.liveModel = model; save("settings"); $("camBtn").disabled = false;
+      L.ready = true; L.swapping = false; S.settings.liveModel = model; S.settings.liveNoSearch = !!L.noSearch; save("settings"); L.reconnects = 0; $("camBtn").disabled = false;
       setMode("listening"); setStatus("I'm listening…");
       if (!isReconnect) ws.send(JSON.stringify({ realtimeInput:{ text: S.history.length ? "(Call connected. It is " + ukNow() + ". Pick up like a friend would, in a few words that fit the time of day. If one of your follow-ups is due, or something from our recent chats is worth a quick mention, you may bring up one thing briefly; otherwise just say hi.)" : "(First ever call. Introduce yourself warmly and briefly as Dan 2.0, and ask me something about myself so you can get to know me.)" } }));
       return;
@@ -847,16 +851,22 @@ function connectLive(mi, isReconnect){
     if (m.toolCall && m.toolCall.functionCalls) {
       Promise.all(m.toolCall.functionCalls.map(async fc => ({ id:fc.id, name:fc.name, response: await runTool(fc.name, fc.args) }))).then(functionResponses => { if (ws.readyState === 1) ws.send(JSON.stringify({ toolResponse:{ functionResponses } })); });
     }
-    if (m.goAway) { L.goingAway = true; }
+    if (m.sessionResumptionUpdate && m.sessionResumptionUpdate.resumable !== false && m.sessionResumptionUpdate.newHandle) L.resumeHandle = m.sessionResumptionUpdate.newHandle;
+    if (m.goAway && !L.swapping) {
+      // connection is about to be cut: open a fresh one now and hand over seamlessly
+      L.swapping = true; const old = ws;
+      setTimeout(() => { if (!L || L.ws !== old) return; L.handover = true; connectLive(L.mi, true); try { old.close(); } catch (e) {} }, 400);
+    }
   };
   ws.onerror = () => {};
   ws.onclose = (ev) => {
     if (!L || L.ws !== ws || !live) return;
+    if (!L.ready && L.resumeHandle) { L.resumeHandle = null; connectLive(mi, isReconnect); return; } // handle expired → fresh session
     if (!L.ready) { L.lastErr = ev.reason || ("connection closed (" + ev.code + ")"); if (/api key|auth|permission denied/i.test(ev.reason || "")) { addLog("sys", "Google refused your key: " + ev.reason); stopLive(); return; } if (!L.noSearch && !/not found|unknown model/i.test(ev.reason || "")) { L.noSearch = true; if (!S.flags_searchNote) { S.flags_searchNote = 1; addLog("sys", "Using Dan’s backup web search (built-in call search isn’t available on your key)."); } connectLive(mi, isReconnect); return; } L.noSearch = false; connectLive(mi + 1, isReconnect); return; }
     // dropped mid-call (sessions have a time limit) → reconnect quietly
     commitBubble("me"); commitBubble("dan"); stopPlayback();
     if ((L.reconnects = (L.reconnects || 0) + 1) > 5) { addLog("sys", "Call dropped. Tap to call again."); stopLive(); return; }
-    setStatus("Reconnecting…"); setTimeout(() => connectLive(mi, true), 300);
+    setStatus(L.resumeHandle ? "One moment…" : "Reconnecting…"); setTimeout(() => connectLive(mi, true), L.resumeHandle ? 50 : 300);
   };
 }
 
@@ -864,7 +874,8 @@ async function startLive(){
   if (live) return;
   live = true; document.body.classList.add("live"); $("orbLbl").textContent = "END";
   setMode("thinking"); setStatus("Connecting…");
-  L = { sources:new Set(), playTime:0, meT:"", danT:"", meB:null, danB:null, histStart:S.history.length, started:Date.now() };
+  L = { sources:new Set(), playTime:0, meT:"", danT:"", meB:null, danB:null, histStart:S.history.length, started:Date.now(), noSearch:!!S.settings.liveNoSearch };
+  const locP = (S.settings.location !== false) ? refreshLocation(5000) : null;
   try { if (navigator.audioSession) navigator.audioSession.type = "play-and-record"; } catch (e) {}
   try {
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -898,7 +909,7 @@ async function startLive(){
     };
   }
   L.src.connect(L.node); L.node.connect(mute);
-  if (S.settings.location !== false) { setStatus("Locating…"); await Promise.race([refreshLocation(5000), new Promise(r => setTimeout(r, 2500))]); }
+  if (locP && !(GEO && Date.now() - GEO.at < 15 * 60e3)) { setStatus("Connecting…"); await Promise.race([locP, new Promise(r => setTimeout(r, 1200))]); }
   connectLive(0, false);
 }
 
@@ -1496,6 +1507,46 @@ function renderFollowups(){
   });
 }
 
+/* ---------- Health check ---------- */
+async function healthCheck(){
+  const ul = $("hcList"); ul.innerHTML = "";
+  const row = (name) => { const li = document.createElement("li"); li.innerHTML = `<span class="t">⏳ ${name}</span>`; ul.appendChild(li); return (ok, msg) => { li.innerHTML = `<span class="t">${ok === true ? "✅" : ok === "warn" ? "⚠️" : "❌"} ${name}<small>${esc(msg || "")}</small></span>`; }; };
+  const key = S.settings.key, H = { "Content-Type":"application/json", "x-goog-api-key":key };
+  let r1 = row("Internet"); r1(navigator.onLine, navigator.onLine ? "Online" : "No connection – calls won't work");
+  let r2 = row("Gemini key");
+  try { const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", { headers:{ "x-goog-api-key":key } }); r2(r.ok, r.ok ? "Accepted by Google" : "Google refused it (" + r.status + ") – paste a fresh key in Settings"); } catch (e) { r2(false, "Couldn't reach Google: " + e.message); }
+  let r3 = row("Typed chat & notes");
+  try { const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent`, { method:"POST", headers:H, body:JSON.stringify({ contents:[{ role:"user", parts:[{ text:"Reply OK" }] }], generationConfig:{ maxOutputTokens:5 } }) }); r3(r.ok ? true : r.status === 429 ? "warn" : false, r.ok ? "Working" : r.status === 429 ? "Daily free limit reached – resets 8am UK" : "Error " + r.status); } catch (e) { r3(false, e.message); }
+  let r4 = row("Live calls");
+  await new Promise(res => {
+    const models = [S.settings.liveModel, ...LIVE_MODELS].filter((m, i, a) => m && a.indexOf(m) === i); let i = 0;
+    const tryOne = () => {
+      if (i >= models.length) { r4(false, "No live voice model accepted your key – try again later"); return res(); }
+      const m = models[i++]; let done = false;
+      const ws = new WebSocket("wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + encodeURIComponent(key));
+      const t = setTimeout(() => { if (!done) { done = true; try { ws.close(); } catch (e) {} tryOne(); } }, 8000);
+      ws.onopen = () => ws.send(JSON.stringify({ setup:{ model:"models/" + m, generationConfig:{ responseModalities:["AUDIO"] } } }));
+      ws.onmessage = async (ev) => { let d; try { d = JSON.parse(typeof ev.data === "string" ? ev.data : await ev.data.text()); } catch (e) { return; } if (d.setupComplete && !done) { done = true; clearTimeout(t); r4(true, "Connected using " + m); try { ws.close(); } catch (e) {} res(); } };
+      ws.onclose = () => { if (!done) { done = true; clearTimeout(t); tryOne(); } };
+    };
+    tryOne();
+  });
+  let r5 = row("Web search"); r5(S.settings.liveNoSearch ? "warn" : true, S.settings.liveNoSearch ? "Built-in call search off on your key – Dan uses his backup search instead (works fine)" : "Built-in search available");
+  let r6 = row("Microphone");
+  try { const st = await navigator.mediaDevices.getUserMedia({ audio:true }); st.getTracks().forEach(t => t.stop()); r6(true, "Allowed"); } catch (e) { r6(false, "Blocked – Settings → Apps → Safari → Microphone → Allow"); }
+  let r7 = row("Location");
+  if (S.settings.location === false) r7("warn", "Switched off in Dan's settings"); else { const g = await refreshLocation(6000); r7(g ? true : "warn", g ? (g.place || "Found") + " (±" + g.acc + " m)" : "Not available – Settings → Apps → Safari → Location"); }
+  let r8 = row("Document search");
+  const tot = S.docs.reduce((n, d) => n + d.chunks.length, 0), vec = S.docs.reduce((n, d) => n + (d.vecs || []).filter(Boolean).length, 0);
+  if (vec < tot) indexDocs();
+  r8(vec === tot ? true : "warn", `${S.docs.length} files · ${vec}/${tot} sections indexed by meaning${vec < tot ? " (indexing now)" : ""}`);
+  let r9 = row("Storage");
+  try { const e = await navigator.storage.estimate(); const persisted = navigator.storage.persisted ? await navigator.storage.persisted() : false; r9(persisted ? true : "warn", `${(e.usage / 1048576).toFixed(1)} MB used${persisted ? " · protected from clean-up" : " · not protected – export a backup regularly"}`); } catch (e) { r9("warn", "Unknown"); }
+  let r10 = row("Offline app");
+  try { const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration(); r10(reg ? true : "warn", reg ? "Installed – opens instantly" : "Will install after the next visit"); } catch (e) { r10("warn", "Not supported here"); }
+}
+$("hcRun").onclick = healthCheck;
+
 function renderAll(){ renderHistory(); renderTasks(); renderMem(); renderDocs(); renderWritten(); renderFollowups(); renderLessons(); }
 function netStatus(){ $("net").textContent = navigator.onLine ? "● online" : "○ offline"; $("net").style.color = navigator.onLine ? "var(--green)" : "var(--red)"; }
 window.addEventListener("online", netStatus); window.addEventListener("offline", netStatus);
@@ -1569,6 +1620,15 @@ new MutationObserver(() => {
   } catch (e) {}
   renderAll(); netStatus(); tickClock();
   setTimeout(indexDocs, 3000);
+  try { if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js"); } catch (e) {}
+  // housekeeping: keep things quick as Dan's memory grows
+  try {
+    const now = Date.now(), d = 864e5; let ch = false;
+    if (S.history.length > 300) { S.history = S.history.slice(-300); save("history"); }
+    const t0 = S.tasks.length; S.tasks = S.tasks.filter(t => !t.done || now - (t.at || now) < 60 * d); if (S.tasks.length !== t0) { save("tasks"); renderTasks(); }
+    const f0 = S.followups.length; S.followups = S.followups.filter(f => !f.done || now - (f.at || now) < 30 * d); if (S.followups.length !== f0) save("followups");
+    if (S.written.length > 200) { S.written = S.written.slice(0, 200); save("written"); }
+  } catch (e) {}
   if (S.settings.location !== false) { try { const st = navigator.permissions && await navigator.permissions.query({ name:"geolocation" }); if (st && st.state === "granted") refreshLocation(8000); } catch (e) {} }
   if (!S.settings.key) { $("setup").classList.add("on"); $("setName").value = S.settings.name || ""; }
 })();
