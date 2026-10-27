@@ -98,10 +98,17 @@ li.done .chk{background:var(--cyan2)}
     <li>Paste it below and tap Start.</li>
   </ol>
   <div class="field"><label>Your name (what Dan calls you)</label><input id="setName" placeholder="e.g. Dan" autocomplete="off"></div>
+  <div class="field"><label>Your email (Dan uses it to send you notes)</label><input id="setEmail" type="email" autocapitalize="off" spellcheck="false" placeholder="you@example.com"></div>
   <div class="field"><label>Gemini API key</label><input id="setKey" placeholder="Paste your key" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
   <div class="err" id="setErr"></div>
   <button class="btn pri" id="setGo" style="width:100%;padding:14px">Start</button>
   <p class="hint" style="margin-top:18px">Your key, memory and files are stored only on this phone. Free-tier note: Google may use what you send to improve its products, so avoid real names or confidential case details.</p>
+</div>
+
+<div id="viewer" style="position:fixed;inset:0;background:var(--bg);z-index:9;display:none;flex-direction:column;padding:calc(env(safe-area-inset-top) + 10px) 16px calc(env(safe-area-inset-bottom) + 12px)">
+  <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:8px"><b id="vTitle" style="font-size:17px;flex:1"></b><button class="btn" id="vClose">Close</button></div>
+  <textarea id="vBody" style="flex:1;min-height:0;font-size:15px;line-height:1.45"></textarea>
+  <div class="row" style="margin-top:10px"><button class="btn pri" id="vEmail">Email</button><button class="btn" id="vShare">Share / Word</button><button class="btn" id="vCopy">Copy</button><button class="btn danger" id="vDel">Delete</button></div>
 </div>
 
 <header>
@@ -148,9 +155,17 @@ li.done .chk{background:var(--cyan2)}
     <ul class="items" id="docList"></ul>
   </section>
 
+  <section id="docs" class="view">
+    <h2>Documents Dan wrote</h2>
+    <p class="hint">Ask Dan to write a letter, policy, report or notes and he saves it here. After every call he also saves call notes. Tap one to email, share or open it in Word.</p>
+    <ul class="items" id="wList"></ul>
+  </section>
+
   <section id="settings" class="view">
     <h2>Settings</h2>
     <div class="field"><label>Your name</label><input id="sName"></div>
+    <div class="field"><label>Your email (for notes and documents)</label><input id="sEmail" type="email" autocapitalize="off" spellcheck="false" placeholder="you@example.com"></div>
+    <div class="field"><label><input type="checkbox" id="sNotes" style="width:auto;margin-right:8px">Save notes after every call</label></div>
     <div class="field"><label>Gemini API key</label><input id="sKey" autocapitalize="off" spellcheck="false"></div>
     <div class="field"><label>Model</label><input id="sModel" autocapitalize="off" spellcheck="false"></div>
     <div class="field"><label>Call voice (live calls)</label><select id="sLiveVoice"></select></div>
@@ -175,6 +190,7 @@ li.done .chk{background:var(--cyan2)}
   <button data-v="tasks"><i>☑</i>Tasks</button>
   <button data-v="memory"><i>✦</i>Memory</button>
   <button data-v="files"><i>▤</i>Files</button>
+  <button data-v="docs"><i>✎</i>Docs</button>
   <button data-v="settings"><i>⚙</i>Settings</button>
 </nav>
 
@@ -220,7 +236,7 @@ const DB = (() => {
   return { get, set };
 })();
 
-const S = { settings:{}, memories:[], tasks:[], history:[], docs:[] };
+const S = { settings:{}, memories:[], tasks:[], history:[], docs:[], written:[] };
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 async function loadAll(){
   S.settings = await DB.get("settings", {});
@@ -228,6 +244,8 @@ async function loadAll(){
   S.tasks = await DB.get("tasks", []);
   S.history = await DB.get("history", []);
   S.docs = await DB.get("docs", []);
+  S.written = await DB.get("written", []);
+  if (S.settings.autoNotes === undefined) S.settings.autoNotes = true;
   if (!S.settings.model) S.settings.model = "gemini-flash-latest";
   if (!S.settings.rate) S.settings.rate = 1.05;
 }
@@ -308,7 +326,9 @@ How to reply:
   "forget": [exact text of memory lines to delete when ${name} asks you to forget something or a fact is now wrong],
   "add_tasks": [{"text": "...", "due": "plain date like Fri 30 Oct, or empty"}],
   "complete_tasks": [exact text of open tasks to mark done],
-  "message": {"to": "who", "body": "the text written as ${name} would send it"} (only when ${name} asks you to send or draft a message; say out loud that it's ready to send).
+  "message": {"to": "who", "body": "the text written as ${name} would send it"} (only when ${name} asks you to send or draft a message; say out loud that it's ready to send),
+  "document": {"title": "...", "content": "the full document"} (when asked to write/create a document, letter, policy, report, notes; write it in full, properly structured; say out loud it's saved in Docs and keep the spoken part short),
+  "email": {"to": "address or empty for ${name}'s own email", "subject": "...", "body": "..."} (when asked to email something; say out loud it's ready to send).
 - Never read the actions line out loud or mention it.
 - When you use a knowledge file, mention its name briefly.`;
 }
@@ -405,6 +425,8 @@ function applyActions(out){
   if (changed.m) { save("memories"); renderMem(); }
   if (changed.t) { save("tasks"); renderTasks(); }
   if (out.message && out.message.body) showMessageCard(out.message);
+  if (out.document && out.document.content) { const d = saveWritten(out.document.title, out.document.content); showDocCard(d); }
+  if (out.email && out.email.body) showEmailCard(out.email);
 }
 
 function showMessageCard(m){
@@ -548,6 +570,8 @@ Use your tools silently (never say you're calling a tool):
 - add_task / complete_task: manage the task list.
 - search_documents: ALWAYS use this before answering anything that could be covered by the loaded knowledge files, and mention which file you used.
 - draft_message: when asked to text or message someone; then say it's ready to send.
+- create_document: when asked to write or create any document, letter, policy, report or notes; write it in full; then say briefly it's saved in Docs (don't read it all out).
+- draft_email: when asked to email something (to ${S.settings.name || "the user"} by default); then say it's ready to send.
 ${recent ? "\nRecent conversation, for continuity:\n" + recent : ""}`;
 }
 
@@ -557,7 +581,9 @@ const LIVE_TOOLS = [{ functionDeclarations: [
   { name:"add_task", description:"Add a task to the user's task list", parameters:{ type:"OBJECT", properties:{ text:{ type:"STRING" }, due:{ type:"STRING", description:"plain date like Fri 30 Oct, or empty" } }, required:["text"] } },
   { name:"complete_task", description:"Mark an open task as done", parameters:{ type:"OBJECT", properties:{ text:{ type:"STRING" } }, required:["text"] } },
   { name:"search_documents", description:"Search the user's loaded knowledge files (employment law, food manufacturing, policies, SOPs)", parameters:{ type:"OBJECT", properties:{ query:{ type:"STRING" } }, required:["query"] } },
-  { name:"draft_message", description:"Draft a text message for the user to send", parameters:{ type:"OBJECT", properties:{ to:{ type:"STRING" }, body:{ type:"STRING" } }, required:["body"] } }
+  { name:"draft_message", description:"Draft a text message for the user to send", parameters:{ type:"OBJECT", properties:{ to:{ type:"STRING" }, body:{ type:"STRING" } }, required:["body"] } },
+  { name:"create_document", description:"Write and save a full document (letter, policy, report, notes, checklist, procedure) to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, content:{ type:"STRING", description:"the complete document text, well structured with headings" } }, required:["title","content"] } },
+  { name:"draft_email", description:"Prepare an email for the user to send. Leave 'to' empty to send it to the user's own email.", parameters:{ type:"OBJECT", properties:{ to:{ type:"STRING" }, subject:{ type:"STRING" }, body:{ type:"STRING" } }, required:["subject","body"] } }
 ]}];
 
 function runTool(name, a){
@@ -568,6 +594,8 @@ function runTool(name, a){
     else if (name === "add_task") applyActions({ add_tasks:[{ text:a.text, due:a.due || "" }] });
     else if (name === "complete_task") applyActions({ complete_tasks:[a.text] });
     else if (name === "draft_message") applyActions({ message:{ to:a.to || "", body:a.body } });
+    else if (name === "create_document") applyActions({ document:{ title:a.title, content:a.content } });
+    else if (name === "draft_email") applyActions({ email:{ to:a.to || "", subject:a.subject, body:a.body } });
     else if (name === "search_documents") {
       const hits = searchDocs(a.query || "", 4);
       return { results: hits.length ? hits.map(h => ({ file:h.doc, text:h.text.slice(0, 1400) })) : [], note: hits.length ? "" : (S.docs.length ? "No matching passages." : "No knowledge files loaded.") };
@@ -664,7 +692,7 @@ async function startLive(){
   if (live) return;
   live = true; document.body.classList.add("live"); $("orbLbl").textContent = "END";
   setMode("thinking"); setStatus("Connecting…");
-  L = { sources:new Set(), playTime:0, meT:"", danT:"", meB:null, danB:null };
+  L = { sources:new Set(), playTime:0, meT:"", danT:"", meB:null, danB:null, histStart:S.history.length, started:Date.now() };
   try { if (navigator.audioSession) navigator.audioSession.type = "play-and-record"; } catch (e) {}
   try {
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -705,6 +733,8 @@ function stopLive(){
   if (L) {
     commitBubble("me"); commitBubble("dan"); stopPlayback();
     const l = L; L = null;
+    const turns = S.history.slice(l.histStart);
+    if (S.settings.autoNotes && turns.filter(t => t.role === "me").length >= 2) makeCallNotes(turns, l.started);
     try { l.ws && l.ws.close(); } catch (e) {}
     try { l.stream && l.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
     try { l.ctx && l.ctx.close(); } catch (e) {}
@@ -806,7 +836,7 @@ function fillVoices(){
   if (cur) sel.value = cur.voiceURI;
 }
 function fillSettings(){
-  $("sName").value = S.settings.name || ""; $("sKey").value = S.settings.key || "";
+  $("sName").value = S.settings.name || ""; $("sKey").value = S.settings.key || ""; $("sEmail").value = S.settings.email || ""; $("sNotes").checked = S.settings.autoNotes !== false;
   $("sModel").value = S.settings.model; $("sLiveVoice").innerHTML = LIVE_VOICES.map(v => `<option>${v}</option>`).join(""); $("sLiveVoice").value = S.settings.liveVoice || "Charon"; $("sRate").value = S.settings.rate; fillVoices();
   $("about").textContent = `Dan 2.0 · ${S.memories.length} memories · ${S.tasks.filter(t => !t.done).length} open tasks · ${S.docs.length} files. Everything is stored on this phone only.`;
 }
@@ -827,10 +857,10 @@ $("memAdd").onclick = () => { const v = $("memIn").value.trim(); if (!v) return;
 $("fileBtn").onclick = () => $("fileIn").click();
 $("fileIn").onchange = (e) => { handleFiles([...e.target.files]); e.target.value = ""; };
 $("pasteAdd").onclick = async () => { const n = $("pasteName").value.trim() || "Pasted note " + ukDate(Date.now()); const t = $("pasteText").value; try { await addDoc(n, t); $("pasteName").value = ""; $("pasteText").value = ""; $("fileErr").textContent = "Saved " + n; } catch (e) { $("fileErr").textContent = e.message; } };
-$("sSave").onclick = () => { S.settings.name = $("sName").value.trim(); S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
+$("sSave").onclick = () => { S.settings.name = $("sName").value.trim(); S.settings.email = $("sEmail").value.trim(); S.settings.autoNotes = $("sNotes").checked; S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
 $("sTest").onclick = () => { S.settings.voice = $("sVoice").value; S.settings.rate = Number($("sRate").value); try { synth.cancel(); } catch (e) {} speak("Dan 2.0, at your service."); };
 $("bExport").onclick = () => {
-  const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs });
+  const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs, written:S.written });
   const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], { type:"application/json" }));
   a.download = "dan2-backup-" + new Date().toISOString().slice(0, 10) + ".json"; document.body.appendChild(a); a.click(); a.remove();
 };
@@ -839,9 +869,9 @@ $("bFile").onchange = async (e) => {
   const f = e.target.files[0]; if (!f) return;
   try {
     const d = JSON.parse(await f.text()); if (d.app !== "dan2") throw new Error("Not a Dan 2.0 backup");
-    S.memories = d.memories || []; S.tasks = d.tasks || []; S.history = d.history || []; S.docs = d.docs || [];
+    S.memories = d.memories || []; S.tasks = d.tasks || []; S.history = d.history || []; S.docs = d.docs || []; S.written = d.written || [];
     S.settings = { ...S.settings, ...(d.settings || {}), key:S.settings.key };
-    await Promise.all(["memories","tasks","history","docs","settings"].map(save));
+    await Promise.all(["memories","tasks","history","docs","written","settings"].map(save));
     renderAll(); fillSettings(); $("about").textContent = "Backup restored ✓";
   } catch (err) { $("about").textContent = "Import failed: " + err.message; }
   e.target.value = "";
@@ -849,8 +879,8 @@ $("bFile").onchange = async (e) => {
 $("bClearChat").onclick = () => { if ($("bClearChat").dataset.sure) { S.history = []; save("history"); renderHistory(); $("bClearChat").textContent = "Cleared ✓"; delete $("bClearChat").dataset.sure; } else { $("bClearChat").dataset.sure = 1; $("bClearChat").textContent = "Tap again to confirm"; } };
 $("bWipe").onclick = async () => {
   if (!$("bWipe").dataset.sure) { $("bWipe").dataset.sure = 1; $("bWipe").textContent = "Tap again – deletes all"; return; }
-  S.memories = []; S.tasks = []; S.history = []; S.docs = []; S.settings = { model:"gemini-flash-latest", rate:1 };
-  await Promise.all(["memories","tasks","history","docs","settings"].map(save));
+  S.memories = []; S.tasks = []; S.history = []; S.docs = []; S.written = []; S.settings = { model:"gemini-flash-latest", rate:1 };
+  await Promise.all(["memories","tasks","history","docs","written","settings"].map(save));
   location.reload();
 };
 $("setGo").onclick = async () => {
@@ -861,10 +891,85 @@ $("setGo").onclick = async () => {
     const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", { headers:{ "x-goog-api-key": key } });
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error((j.error && j.error.message) || ("Error " + r.status)); }
   } catch (e) { $("setErr").style.color = ""; $("setErr").textContent = "Google didn't accept that key: " + e.message; return; }
-  S.settings.key = key; S.settings.name = name; await save("settings");
+  S.settings.key = key; S.settings.name = name; S.settings.email = $("setEmail").value.trim(); await save("settings");
   $("setup").classList.remove("on"); renderHistory();
 };
-function renderAll(){ renderHistory(); renderTasks(); renderMem(); renderDocs(); }
+/* ============================== Documents & email ============================== */
+function saveWritten(title, content, kind){
+  const d = { id:uid(), title:(title || "Untitled").trim(), content:String(content || "").trim(), kind:kind || "doc", at:Date.now() };
+  S.written.unshift(d); if (S.written.length > 300) S.written.length = 300;
+  save("written"); renderWritten(); return d;
+}
+function mailtoLink(to, subject, body){
+  const max = 6000; let b = body || "";
+  if (b.length > max) b = b.slice(0, max) + "\n\n[…shortened – use Share for the full document]";
+  return "mailto:" + encodeURIComponent((to || S.settings.email || "").trim()) + "?subject=" + encodeURIComponent(subject || "") + "&body=" + encodeURIComponent(b);
+}
+function showEmailCard(e){
+  const c = document.createElement("div"); c.className = "card";
+  const to = e.to || S.settings.email || "(add your email in Settings)";
+  c.innerHTML = `<b>Email to ${esc(to)}</b><div class="body"><u>${esc(e.subject || "")}</u>\n${esc(e.body)}</div><div class="row"><a class="btn pri" href="${mailtoLink(e.to, e.subject, e.body)}">Open in Mail</a><button class="btn cp">Copy</button></div>`;
+  c.querySelector(".cp").onclick = async (ev) => { try { await navigator.clipboard.writeText(e.body); ev.target.textContent = "Copied"; } catch (_) { ev.target.textContent = "Couldn't copy"; } };
+  $("log").appendChild(c); $("log").scrollTop = 1e9;
+}
+function showDocCard(d){
+  const c = document.createElement("div"); c.className = "card";
+  c.innerHTML = `<b>Saved to Docs</b><div class="body">${esc(d.title)}</div><div class="row"><button class="btn pri op">Open</button><a class="btn" href="${mailtoLink("", d.title, d.content)}">Email it</a></div>`;
+  c.querySelector(".op").onclick = () => openViewer(d);
+  $("log").appendChild(c); $("log").scrollTop = 1e9;
+}
+let vDoc = null;
+function openViewer(d){ vDoc = d; $("vTitle").textContent = d.title; $("vBody").value = d.content; $("viewer").style.display = "flex"; }
+function closeViewer(){ if (vDoc && $("vBody").value !== vDoc.content) { vDoc.content = $("vBody").value; save("written"); } $("viewer").style.display = "none"; vDoc = null; renderWritten(); }
+function wordBlob(d){
+  const html = `<html><head><meta charset="utf-8"><title>${esc(d.title)}</title></head><body style="font-family:Calibri,Arial;font-size:11pt"><h1 style="font-size:16pt">${esc(d.title)}</h1>` +
+    esc(d.content).split(/\n{2,}/).map(p => "<p>" + p.replace(/\n/g, "<br>") + "</p>").join("") + "</body></html>";
+  return new Blob(["\ufeff" + html], { type:"application/msword" });
+}
+async function shareDoc(d){
+  const fname = d.title.replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || "Document";
+  const file = new File([wordBlob(d)], fname + ".doc", { type:"application/msword" });
+  try { if (navigator.canShare && navigator.canShare({ files:[file] })) { await navigator.share({ files:[file], title:d.title }); return; } } catch (e) { if (e.name === "AbortError") return; }
+  const a = document.createElement("a"); a.href = URL.createObjectURL(file); a.download = file.name; document.body.appendChild(a); a.click(); a.remove();
+}
+function renderWritten(){
+  const ul = $("wList"); if (!ul) return; ul.innerHTML = "";
+  if (!S.written.length) ul.innerHTML = '<li><span class="t" style="color:var(--dim)">Nothing yet. Try: "Dan, write me an invite letter for a disciplinary meeting."</span></li>';
+  S.written.forEach(d => {
+    const li = document.createElement("li"); li.style.cursor = "pointer";
+    li.innerHTML = `<span class="t">${d.kind === "notes" ? "📝 " : "📄 "}${esc(d.title)}<small>${ukDate(d.at)} · ${Math.max(1, Math.round(d.content.split(/\s+/).length))} words</small></span><span style="color:var(--dim)">›</span>`;
+    li.onclick = () => openViewer(d); ul.appendChild(li);
+  });
+}
+async function makeCallNotes(turns, started){
+  const when = new Date(started).toLocaleString("en-GB", { timeZone:"Europe/London", weekday:"short", day:"numeric", month:"short", hour:"2-digit", minute:"2-digit" });
+  const transcript = turns.map(t => (t.role === "dan" ? "Dan 2.0: " : (S.settings.name || "Me") + ": ") + t.text).join("\n");
+  let notes = "";
+  try {
+    const prompt = `Write concise call notes from this conversation between ${S.settings.name || "the user"} and their assistant Dan. Use these sections with plain-text headings: SUMMARY (2-3 sentences), KEY POINTS (short dash list), ACTIONS (dash list with who/when if known; "None" if none), FOLLOW-UPS (anything still open). UK English. No preamble.\n\nTRANSCRIPT:\n${transcript}`;
+    for (const model of ["gemini-flash-lite-latest", S.settings.model || "gemini-flash-latest"]) {
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, { method:"POST", headers:{ "Content-Type":"application/json", "x-goog-api-key":S.settings.key }, body:JSON.stringify({ contents:[{ role:"user", parts:[{ text:prompt }] }], generationConfig:{ temperature:0.3, maxOutputTokens:1200 } }) });
+      if (!r.ok) continue;
+      const j = await r.json();
+      notes = (((j.candidates || [])[0] || {}).content || {}).parts?.map(p => p.text || "").join("").trim() || "";
+      if (notes) break;
+    }
+  } catch (e) {}
+  if (!notes) notes = "TRANSCRIPT\n" + transcript;
+  else notes += "\n\nFULL TRANSCRIPT\n" + transcript;
+  const d = saveWritten("Call notes – " + when, notes.replace(/\*\*/g, ""), "notes");
+  const c = document.createElement("div"); c.className = "card";
+  c.innerHTML = `<b>Call notes saved</b><div class="body">${esc(d.title)}</div><div class="row"><button class="btn op">Open</button><a class="btn pri" href="${mailtoLink("", d.title, d.content)}">Email me the notes</a></div>`;
+  c.querySelector(".op").onclick = () => openViewer(d);
+  $("log").appendChild(c); $("log").scrollTop = 1e9;
+}
+$("vClose").onclick = closeViewer;
+$("vEmail").onclick = () => { if (!vDoc) return; vDoc.content = $("vBody").value; save("written"); location.href = mailtoLink("", vDoc.title, vDoc.content); };
+$("vShare").onclick = () => { if (!vDoc) return; vDoc.content = $("vBody").value; save("written"); shareDoc(vDoc); };
+$("vCopy").onclick = async () => { try { await navigator.clipboard.writeText($("vBody").value); $("vCopy").textContent = "Copied ✓"; } catch (e) { $("vCopy").textContent = "Couldn't copy"; } setTimeout(() => $("vCopy").textContent = "Copy", 1500); };
+$("vDel").onclick = () => { if (!vDoc) return; if (!$("vDel").dataset.sure) { $("vDel").dataset.sure = 1; $("vDel").textContent = "Tap again"; return; } delete $("vDel").dataset.sure; $("vDel").textContent = "Delete"; S.written = S.written.filter(x => x !== vDoc); save("written"); vDoc = null; $("viewer").style.display = "none"; renderWritten(); };
+
+function renderAll(){ renderHistory(); renderTasks(); renderMem(); renderDocs(); renderWritten(); }
 function netStatus(){ $("net").textContent = navigator.onLine ? "● online" : "○ offline"; $("net").style.color = navigator.onLine ? "var(--green)" : "var(--red)"; }
 window.addEventListener("online", netStatus); window.addEventListener("offline", netStatus);
 document.addEventListener("visibilitychange", () => { if (document.hidden && live) stopLive(); });
