@@ -47,6 +47,10 @@ main{flex:1;overflow:hidden;position:relative}
   background:radial-gradient(circle at 50% 50%,#0b2633 0,#071820 60%,#05080d 100%);
   box-shadow:0 0 0 3px var(--line),0 0 24px rgba(51,214,255,.15);transition:transform .15s}
 #orb:active{transform:scale(.96)}
+.side{width:58px;height:58px;border-radius:50%;background:var(--panel);border:1px solid var(--line);color:var(--text);font-size:20px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1}
+.side small{font-size:10px;color:var(--dim);margin-top:3px}
+.side:disabled{opacity:.3}
+.side.on{border-color:var(--cyan);box-shadow:0 0 14px rgba(51,214,255,.5)}
 #orb .core{position:absolute;inset:30px;border-radius:50%;background:var(--cyan2);opacity:.55;transition:all .3s}
 #orb .ring{position:absolute;inset:8px;border-radius:50%;border:3px solid var(--cyan2);opacity:.6}
 #orb .lbl{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;color:#fff;letter-spacing:.5px}
@@ -120,9 +124,12 @@ li.done .chk{background:var(--cyan2)}
   <section id="talk" class="view on">
     <div id="log"></div>
     <div id="dock">
+      <video id="camView" playsinline muted autoplay style="display:none;width:100%;max-height:34vh;object-fit:cover;border-radius:16px;border:2px solid var(--cyan);background:#000"></video>
       <div id="interim"></div>
       <div id="status">Tap to call Dan</div>
+      <div class="row" style="align-items:center;gap:22px"><button id="camBtn" class="side" aria-label="Camera" disabled>👁<small>Look</small></button>
       <button id="orb" aria-label="Start or stop conversation"><div class="ring"></div><div class="core"></div><div class="lbl" id="orbLbl">CALL</div></button>
+      <button id="flipBtn" class="side" aria-label="Switch camera" disabled>⟲<small>Flip</small></button></div>
       <div id="typebar"><input id="typeIn" placeholder="Or type to Dan…" enterkeyhint="send"><button class="btn" id="typeGo">Send</button></div>
     </div>
   </section>
@@ -352,7 +359,7 @@ How to reply:
 }
 
 const MARK = "###ACTIONS###";
-let noThinking = true;
+let noThinking = true, textSearch = true;
 
 // Streams Dan's answer. onSpeech(sentence) is called as soon as each sentence is ready.
 async function askDan(userText, signal, onSpeech){
@@ -365,10 +372,11 @@ async function askDan(userText, signal, onSpeech){
   const models = [S.settings.model, "gemini-2.5-flash", "gemini-2.5-flash-lite"].filter((m, i, a) => m && a.indexOf(m) === i);
   let lastErr;
   for (const model of models) {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       const gen = { temperature:0.6, maxOutputTokens:2048 };
       if (noThinking) gen.thinkingConfig = { thinkingBudget:0 };
       const body = { systemInstruction:{ parts:[{ text: systemPrompt() }] }, contents, generationConfig:gen };
+      if (textSearch) body.tools = [{ googleSearch:{} }];
       let r;
       try {
         r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
@@ -382,6 +390,7 @@ async function askDan(userText, signal, onSpeech){
         if (r.status === 400 && /api key/i.test(msg)) throw Object.assign(new Error("Your Gemini key isn't working. Check it in Settings."), { fatal:true });
         if (r.status === 403) throw Object.assign(new Error("Google refused the key (403). Check it in Settings."), { fatal:true });
         if (r.status === 400 && /think/i.test(msg) && noThinking) { noThinking = false; continue; }
+        if (r.status === 400 && /search|grounding|tool/i.test(msg) && textSearch) { textSearch = false; continue; }
         lastErr = new Error(msg); break; // try next model
       }
       // read the SSE stream
@@ -590,6 +599,8 @@ Use your tools silently (never say you're calling a tool):
 - add_task / complete_task: manage the task list.
 - search_documents: ALWAYS use this before answering anything that could be covered by the loaded knowledge files, and mention which file you used.
 - draft_message: when asked to text or message someone; then say it's ready to send.
+- Google Search: use it for anything current or that you're unsure of: news, recent law changes, prices, weather, opening times, sports, companies. Mention the source briefly in speech ("according to the BBC", "gov.uk says"). For UK employment law, prefer gov.uk, legislation.gov.uk and ACAS.
+- Vision: when ${S.settings.name || "the user"} turns the camera on, you can see what they point it at: labels, temperature logs, paperwork, equipment, screens. Describe what matters and help, like you're stood next to them. If the image is unclear, ask them to move closer or hold still.
 - create_document: when asked to write or create any document, letter, policy, report or notes; write it in full; then say briefly it's saved in Docs (don't read it all out).
 - create_spreadsheet: when asked for a spreadsheet, Excel, tracker, rota, log or budget; build it properly with clear headers, sensible example rows if needed, and formulas for totals.
 - create_presentation: when asked for a PowerPoint, slides or presentation; 5 to 12 slides with short punchy bullets and speaker notes.
@@ -676,7 +687,7 @@ function connectLive(mi, isReconnect){
       model:"models/" + model,
       generationConfig:{ responseModalities:["AUDIO"], speechConfig:{ voiceConfig:{ prebuiltVoiceConfig:{ voiceName: S.settings.liveVoice || "Charon" } } } },
       systemInstruction:{ parts:[{ text: livePrompt() }] },
-      tools: LIVE_TOOLS,
+      tools: L.noSearch ? LIVE_TOOLS : [{ googleSearch:{} }, ...LIVE_TOOLS],
       inputAudioTranscription:{}, outputAudioTranscription:{},
       contextWindowCompression:{ slidingWindow:{} }
     }}));
@@ -685,7 +696,7 @@ function connectLive(mi, isReconnect){
     let m; try { m = JSON.parse(typeof ev.data === "string" ? ev.data : await ev.data.text()); } catch (e) { return; }
     if (!L || L.ws !== ws) return;
     if (m.setupComplete) {
-      L.ready = true; S.settings.liveModel = model; save("settings");
+      L.ready = true; S.settings.liveModel = model; save("settings"); $("camBtn").disabled = false;
       setMode("listening"); setStatus("I'm listening…");
       if (!isReconnect) ws.send(JSON.stringify({ realtimeInput:{ text: S.history.length ? "(Call connected. It is " + ukNow() + ". Pick up like a friend would, in a few words that fit the time of day. If something from our recent chats is worth a quick mention you may, otherwise just say hi.)" : "(First ever call. Introduce yourself warmly and briefly as Dan 2.0, and ask me something about myself so you can get to know me.)" } }));
       return;
@@ -707,7 +718,7 @@ function connectLive(mi, isReconnect){
   ws.onerror = () => {};
   ws.onclose = (ev) => {
     if (!L || L.ws !== ws || !live) return;
-    if (!L.ready) { L.lastErr = ev.reason || ("connection closed (" + ev.code + ")"); if (/key|auth|permission/i.test(ev.reason || "")) { addLog("sys", "Google refused your key: " + ev.reason); stopLive(); return; } connectLive(mi + 1, isReconnect); return; }
+    if (!L.ready) { L.lastErr = ev.reason || ("connection closed (" + ev.code + ")"); if (/api key|auth|permission denied/i.test(ev.reason || "")) { addLog("sys", "Google refused your key: " + ev.reason); stopLive(); return; } if (!L.noSearch && !/not found|unknown model/i.test(ev.reason || "")) { L.noSearch = true; connectLive(mi, isReconnect); return; } L.noSearch = false; connectLive(mi + 1, isReconnect); return; }
     // dropped mid-call (sessions have a time limit) → reconnect quietly
     commitBubble("me"); commitBubble("dan"); stopPlayback();
     if ((L.reconnects = (L.reconnects || 0) + 1) > 5) { addLog("sys", "Call dropped. Tap to call again."); stopLive(); return; }
@@ -754,7 +765,36 @@ async function startLive(){
   connectLive(0, false);
 }
 
+/* ---------- Vision ---------- */
+let cam = null; // { stream, timer, facing }
+async function camOn(facing){
+  camOff(true);
+  try {
+    const st = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:facing || "environment", width:{ ideal:1280 }, height:{ ideal:720 } }, audio:false });
+    cam = { stream:st, facing:facing || "environment" };
+    const v = $("camView"); v.srcObject = st; v.style.display = "block"; try { await v.play(); } catch (e) {}
+    $("camBtn").classList.add("on"); $("flipBtn").disabled = false;
+    const cv = document.createElement("canvas");
+    cam.timer = setInterval(() => {
+      if (!L || !L.ready || !L.ws || L.ws.readyState !== 1 || !v.videoWidth) return;
+      const w = 768, h = Math.round(v.videoHeight * w / v.videoWidth); cv.width = w; cv.height = h;
+      cv.getContext("2d").drawImage(v, 0, 0, w, h);
+      const data = cv.toDataURL("image/jpeg", 0.6).split(",")[1];
+      L.ws.send(JSON.stringify({ realtimeInput:{ video:{ data, mimeType:"image/jpeg" } } }));
+    }, 1000);
+    if (L && L.ready) L.ws.send(JSON.stringify({ realtimeInput:{ text:"(I've switched my camera on so you can see. Say briefly what you can see, then help.)" } }));
+  } catch (e) { addLog("sys", "Couldn't open the camera. Allow it in Settings → Apps → Safari → Camera."); camOff(); }
+}
+function camOff(silent){
+  if (!cam) { $("camBtn").classList.remove("on"); $("flipBtn").disabled = true; $("camView").style.display = "none"; return; }
+  clearInterval(cam.timer); try { cam.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  cam = null; $("camView").srcObject = null; $("camView").style.display = "none"; $("camBtn").classList.remove("on"); $("flipBtn").disabled = true;
+}
+$("camBtn").onclick = () => { if (!live) return; cam ? camOff() : camOn("environment"); };
+$("flipBtn").onclick = () => { if (cam) camOn(cam.facing === "environment" ? "user" : "environment"); };
+
 function stopLive(){
+  camOff(); $("camBtn").disabled = true;
   live = false;
   document.body.classList.remove("live"); $("orbLbl").textContent = "CALL";
   if (L) {
