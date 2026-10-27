@@ -168,6 +168,7 @@ li.done .chk{background:var(--cyan2)}
     <div class="field"><label><input type="checkbox" id="sNotes" style="width:auto;margin-right:8px">Save notes after every call</label></div>
     <div class="field"><label>Gemini API key</label><input id="sKey" autocapitalize="off" spellcheck="false"></div>
     <div class="field"><label>Model</label><input id="sModel" autocapitalize="off" spellcheck="false"></div>
+    <div class="field"><label>Dan&#39;s personality (optional, e.g. &quot;more sarcastic&quot;, &quot;call me boss&quot;, &quot;keep it professional&quot;)</label><textarea id="sPersona" style="min-height:70px"></textarea></div>
     <div class="field"><label>Call voice (live calls)</label><select id="sLiveVoice"></select></div>
     <div class="field"><label>Typed-chat voice (iPhone voices)</label><select id="sVoice"></select></div>
     <div class="field"><label>Speaking speed</label><input type="range" id="sRate" min="0.8" max="1.3" step="0.05"></div>
@@ -299,10 +300,25 @@ function systemPrompt(){
   const mems = S.memories.slice(-250).map(m => "- " + m.text).join("\n") || "(nothing yet)";
   const open = S.tasks.filter(t => !t.done).map(t => "- " + t.text + (t.due ? " (due " + t.due + ")" : "")).join("\n") || "(none)";
   const docs = S.docs.map(d => d.name).join(", ") || "(none)";
-  return `You are Dan 2.0, the personal assistant of ${name}, inspired by JARVIS. You are loyal, sharp, calm, a bit dry-witted, British, and you only work for ${name}. You speak with ${name} by voice, so:
-- Keep replies short and natural for speech: usually 1–4 sentences. Go longer only when asked for detail.
-- No markdown, bullet symbols, emojis, headings or URLs in "reply". Speak numbers and legal references naturally.
-- Ask one clear follow-up question when you need more detail.
+  const extra = (S.settings.persona || "").trim();
+  return `You are Dan 2.0, ${name}'s right-hand man: a personal assistant inspired by JARVIS, but above all a real presence. You work only for ${name}.
+
+WHO YOU ARE
+You're British, quick, warm and quietly confident, with a dry sense of humour. You genuinely care about ${name}: how the day's going, the people they mention, the things they're working towards. You have opinions and share them when asked ("Honestly? I'd hold off on that."). You're loyal, but you'll tell ${name} straight when something's a bad idea.
+
+HOW YOU TALK (this matters most)
+- Talk like a real person on the phone, not a computer reading a report. Contractions always ("I'd", "you're", "that's").
+- Short turns. Usually one to three sentences, then let ${name} speak. Go longer only when asked, or when explaining something properly.
+- Vary how you start. Natural openers: "Right,", "Ah,", "Okay so,", "Fair enough.", "Hmm, good question.", "Oh, nice one." Never start two replies the same way, and never say "Certainly!", "Great question!", "As an AI" or "I hope this helps".
+- React before you answer when it fits: sympathy when something's rubbish ("Ah, that's a pain."), enthusiasm for good news, a bit of humour when the moment's light.
+- Use ${name}'s name now and then, not every turn.
+- Remember and bring things back naturally ("Is this the same supplier from last week?"). Use what you remember to make it personal, but don't recite facts back.
+- Ask one natural follow-up question when it moves things on. Don't interrogate.
+- If you're not sure, say so like a person would ("I'm not a hundred percent on that one, let me check the files").
+- Match ${name}'s energy: brisk when they're busy, chattier when they're relaxed, calm and steady when they're stressed.
+- Say numbers, dates and legal references the way people say them out loud ("section ninety-eight", "the twenty-ninth").
+- No markdown, bullets, emojis, headings or URLs in anything you say out loud.
+${extra ? "\nEXTRA PERSONALITY NOTES FROM " + name.toUpperCase() + ":\n" + extra + "\n" : ""}
 
 Your expertise:
 1) UK employment law (England, Wales and Scotland; flag Northern Ireland differences). You know the Employment Rights Act 1996, Equality Act 2010, Working Time Regulations 1998, National Minimum Wage rules, TUPE 2006, the ACAS Code of Practice on disciplinary and grievance procedures, unfair dismissal, redundancy, flexible working, family leave, sickness absence, right to be accompanied, tribunal time limits and ACAS early conciliation. Employment law has been changing (including the Employment Rights Act 2025, phased in over several years), so say when a rule may have changed, prefer facts from ${name}'s knowledge files, and recommend checking ACAS or gov.uk, or getting legal advice, before acting on high-stakes decisions. Give practical HR steps, not just theory.
@@ -562,7 +578,7 @@ function livePrompt(){
   const base = systemPrompt();
   const head = base.slice(0, base.indexOf("How to reply:"));
   const recent = S.history.slice(-14).map(h => (h.role === "dan" ? "Dan: " : "Me: ") + h.text).join("\n");
-  return head + `This is a live voice call. Speak with a refined, calm British (Received Pronunciation) accent, like a polished English butler. Keep it conversational and brief; ${S.settings.name || "the user"} can interrupt you at any time.
+  return head + `This is a live voice call. Speak with a natural British accent and a warm, relaxed tone, with natural rhythm, pauses and the odd "mm" or "right" like a real person. Sound like a mate who happens to be brilliant, not a butler or a robot. Keep it conversational; ${S.settings.name || "the user"} can interrupt you at any time, so stop and listen when they do. Brief acknowledgements like "mm-hm" or "go on" are fine when they're mid-thought.
 
 Use your tools silently (never say you're calling a tool):
 - remember: save new durable facts (always when asked to remember something).
@@ -617,8 +633,8 @@ function playPCM(b64, mime){
   for (let i = 0; i < n; i++) { let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8); if (v >= 32768) v -= 65536; ch[i] = v / 32768; }
   const src = L.ctx.createBufferSource(); src.buffer = buf; src.connect(L.ctx.destination);
   const t = Math.max(L.ctx.currentTime + 0.02, L.playTime); src.start(t); L.playTime = t + buf.duration;
-  L.sources.add(src); setMode("speaking"); setStatus("Dan's talking – just speak to interrupt");
-  src.onended = () => { if (!L) return; L.sources.delete(src); if (!L.sources.size) { setMode("listening"); setStatus("Listening – just talk"); } };
+  L.sources.add(src); setMode("speaking"); setStatus("Dan's talking");
+  src.onended = () => { if (!L) return; L.sources.delete(src); if (!L.sources.size) { setMode("listening"); setStatus("I'm listening…"); } };
 }
 function stopPlayback(){ if (!L) return; L.sources.forEach(s => { try { s.stop(); } catch (e) {} }); L.sources.clear(); L.playTime = 0; }
 
@@ -659,13 +675,13 @@ function connectLive(mi, isReconnect){
     if (!L || L.ws !== ws) return;
     if (m.setupComplete) {
       L.ready = true; S.settings.liveModel = model; save("settings");
-      setMode("listening"); setStatus("Connected – just talk");
-      if (!isReconnect) ws.send(JSON.stringify({ realtimeInput:{ text: S.history.length ? "(Call connected. Greet me in a few words, like picking up the phone.)" : "(First ever call. Introduce yourself briefly as Dan 2.0.)" } }));
+      setMode("listening"); setStatus("I'm listening…");
+      if (!isReconnect) ws.send(JSON.stringify({ realtimeInput:{ text: S.history.length ? "(Call connected. It is " + ukNow() + ". Pick up like a friend would, in a few words that fit the time of day. If something from our recent chats is worth a quick mention you may, otherwise just say hi.)" : "(First ever call. Introduce yourself warmly and briefly as Dan 2.0, and ask me something about myself so you can get to know me.)" } }));
       return;
     }
     const sc = m.serverContent;
     if (sc) {
-      if (sc.interrupted) { stopPlayback(); setMode("listening"); setStatus("Listening – just talk"); }
+      if (sc.interrupted) { stopPlayback(); setMode("listening"); setStatus("I'm listening…"); }
       if (sc.inputTranscription && sc.inputTranscription.text) liveBubble("me", sc.inputTranscription.text);
       if (sc.outputTranscription && sc.outputTranscription.text) liveBubble("dan", sc.outputTranscription.text);
       ((sc.modelTurn && sc.modelTurn.parts) || []).forEach(p => { if (p.inlineData && /audio/.test(p.inlineData.mimeType || "audio")) playPCM(p.inlineData.data, p.inlineData.mimeType); });
@@ -836,7 +852,7 @@ function fillVoices(){
   if (cur) sel.value = cur.voiceURI;
 }
 function fillSettings(){
-  $("sName").value = S.settings.name || ""; $("sKey").value = S.settings.key || ""; $("sEmail").value = S.settings.email || ""; $("sNotes").checked = S.settings.autoNotes !== false;
+  $("sName").value = S.settings.name || ""; $("sKey").value = S.settings.key || ""; $("sEmail").value = S.settings.email || ""; $("sPersona").value = S.settings.persona || ""; $("sNotes").checked = S.settings.autoNotes !== false;
   $("sModel").value = S.settings.model; $("sLiveVoice").innerHTML = LIVE_VOICES.map(v => `<option>${v}</option>`).join(""); $("sLiveVoice").value = S.settings.liveVoice || "Charon"; $("sRate").value = S.settings.rate; fillVoices();
   $("about").textContent = `Dan 2.0 · ${S.memories.length} memories · ${S.tasks.filter(t => !t.done).length} open tasks · ${S.docs.length} files. Everything is stored on this phone only.`;
 }
@@ -857,7 +873,7 @@ $("memAdd").onclick = () => { const v = $("memIn").value.trim(); if (!v) return;
 $("fileBtn").onclick = () => $("fileIn").click();
 $("fileIn").onchange = (e) => { handleFiles([...e.target.files]); e.target.value = ""; };
 $("pasteAdd").onclick = async () => { const n = $("pasteName").value.trim() || "Pasted note " + ukDate(Date.now()); const t = $("pasteText").value; try { await addDoc(n, t); $("pasteName").value = ""; $("pasteText").value = ""; $("fileErr").textContent = "Saved " + n; } catch (e) { $("fileErr").textContent = e.message; } };
-$("sSave").onclick = () => { S.settings.name = $("sName").value.trim(); S.settings.email = $("sEmail").value.trim(); S.settings.autoNotes = $("sNotes").checked; S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
+$("sSave").onclick = () => { S.settings.name = $("sName").value.trim(); S.settings.email = $("sEmail").value.trim(); S.settings.persona = $("sPersona").value.trim(); S.settings.autoNotes = $("sNotes").checked; S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
 $("sTest").onclick = () => { S.settings.voice = $("sVoice").value; S.settings.rate = Number($("sRate").value); try { synth.cancel(); } catch (e) {} speak("Dan 2.0, at your service."); };
 $("bExport").onclick = () => {
   const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs, written:S.written });
