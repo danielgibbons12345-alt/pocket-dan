@@ -146,6 +146,7 @@ li.done .chk{background:var(--cyan2)}
   <p class="hint" style="margin-top:18px">Your key, memory and files are stored only on this phone. Free-tier note: Google may use what you send to improve its products, so avoid real names or confidential case details.</p>
 </div>
 
+<div id="groupBar" style="position:fixed;left:50%;top:calc(env(safe-area-inset-top) + 54px);transform:translateX(-50%);z-index:8;display:none;background:#132a1c;border:1px solid var(--green);color:var(--text);padding:8px 14px;border-radius:999px;font-size:14px;white-space:nowrap">👥 Group · say “<b id="groupWake"></b>” <button class="btn" id="groupStop" style="padding:4px 10px;margin-left:8px;font-size:13px">End</button></div>
 <div id="interpBar" style="position:fixed;left:50%;top:calc(env(safe-area-inset-top) + 10px);transform:translateX(-50%);z-index:8;display:none;background:#10233a;border:1px solid var(--cyan);color:var(--text);padding:8px 14px;border-radius:999px;font-size:14px;white-space:nowrap">🌐 <b id="interpLang"></b> <button class="btn" id="interpStop" style="padding:4px 10px;margin-left:8px;font-size:13px">Stop</button></div>
 
 <div id="recorder" style="position:fixed;inset:0;background:var(--bg);z-index:9;display:none;flex-direction:column;align-items:center;padding:calc(env(safe-area-inset-top) + 24px) 22px calc(env(safe-area-inset-bottom) + 20px);overflow-y:auto">
@@ -230,6 +231,8 @@ li.done .chk{background:var(--cyan2)}
     <div class="row" style="margin-bottom:12px"><input id="memIn" placeholder="Add a memory" style="flex:1"><button class="btn pri" id="memAdd">Add</button></div>
     <h2 style="margin-top:4px">Dan's profile of you</h2>
     <p class="hint" id="profileBox" style="white-space:pre-wrap;color:var(--text)"></p>
+    <h2>People Dan has met</h2>
+    <ul class="items" id="peopleList"></ul>
     <h2>CIPD study progress</h2>
     <ul class="items" id="studyList"></ul>
     <h2>Lessons Dan has learned</h2>
@@ -271,6 +274,7 @@ li.done .chk{background:var(--cyan2)}
     <div class="field"><label>Gemini API key</label><input id="sKey" autocapitalize="off" spellcheck="false"></div>
     <div class="field"><label>Model</label><input id="sModel" autocapitalize="off" spellcheck="false"></div>
     <div class="field"><label>Dan&#39;s personality (optional, e.g. &quot;more sarcastic&quot;, &quot;call me boss&quot;, &quot;keep it professional&quot;)</label><textarea id="sPersona" style="min-height:70px"></textarea></div>
+    <div class="field"><label>Group-mode wake word (what people say to get Dan’s attention)</label><input id="sWake" placeholder="Dan two"></div>
     <div class="field"><label>Accent</label><select id="sAccent"></select></div>
     <div class="field"><label>Call voice (live calls) – Charon, Iapetus and Orus are deepest</label><select id="sLiveVoice"></select></div>
     <div class="field"><label>Typed-chat voice (iPhone voices)</label><select id="sVoice"></select></div>
@@ -366,6 +370,7 @@ async function loadAll(){
   S.otj = await DB.get("otj", []);
   S.care = await DB.get("care", []);
   S.dates = await DB.get("dates", []);
+  S.people = await DB.get("people", []);
   if (S.settings.autoNotes === undefined) S.settings.autoNotes = true;
   if (!S.settings.model) S.settings.model = "gemini-flash-latest";
   if (!S.settings.rate) S.settings.rate = 1.05;
@@ -465,6 +470,7 @@ ${S.profile || "(not built yet)"}
 Things you planned to follow up on with ${name}:
 ${(S.followups || []).filter(f => !f.done).map(f => "- " + f.text + (f.after ? " (raise from " + f.after + ")" : "") + " [noted " + ukDate(f.at) + "]").join("\n") || "(none)"}
 
+GROUP CONVERSATIONS & PEOPLE: when ${name} introduces you to people ("Dan, meet Sam and Jo", "say hello to the team"), call start_group_mode with their names and follow its instructions. In group mode your wake word is "${wakeWords()}". People you've met before: ${(S.people || []).map(p => p.name + (p.role ? " (" + p.role + ")" : "") + (p.notes ? ": " + p.notes : "")).join("; ") || "(nobody yet)"}. Greet people you know warmly by name and remember context about them. Never store or repeat sensitive things about other people (health, HR matters, personal problems). If someone asks you to forget them, call forget_person.
 LIVE INTERPRETER: when ${name} asks you to translate or interpret for someone ("Dan, help me talk to Marek in Polish"), call start_interpreter with the language and follow its instructions exactly; "stop interpreting" → stop_interpreter. Useful for inductions, safety briefings, return-to-work chats and HR meetings with colleagues whose first language isn't English (for formal HR hearings, suggest a professional interpreter if the stakes are high).
 MEETING RECORDER (non-confidential meetings only): when ${name} wants to record or take minutes of a meeting, call open_meeting_recorder (with title/type/people if known) and remind them everyone must agree to be recorded. ${name} has decided NOT to record confidential meetings: if it is an HR, disciplinary, grievance, investigation, absence/health or other confidential meeting, do not open the recorder – remind them kindly and offer instead to help prepare questions beforehand or write up their own notes afterwards. Afterwards you can find the minutes and transcript in their files.
 
@@ -826,6 +832,10 @@ const LIVE_TOOLS = [{ functionDeclarations: [
   { name:"create_presentation", description:"Create a PowerPoint presentation saved to the user's Docs tab", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, slides:{ type:"ARRAY", items:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, bullets:{ type:"ARRAY", items:{ type:"STRING" } }, notes:{ type:"STRING" } }, required:["title"] } } }, required:["title","slides"] } },
   { name:"deep_think", description:"Hand a hard question to Dan's expert reasoning engine (slower, ~5-15s, much more careful). Use for anything complex or high-stakes: employment law situations, HR process decisions, food safety/HACCP judgements, root-cause problems on machines, calculations, plans, or when the user asks you to think harder or double-check.", parameters:{ type:"OBJECT", properties:{ question:{ type:"STRING", description:"the full question, self-contained" }, context:{ type:"STRING", description:"relevant facts from the conversation" } }, required:["question"] } },
   { name:"save_lesson", description:"Save a correction or lesson from the user so you never repeat the mistake (e.g. site-specific values, preferences on how to do things)", parameters:{ type:"OBJECT", properties:{ lesson:{ type:"STRING", description:"e.g. 'Our CIP caustic is 2% at 75C, not 1.5%'" } }, required:["lesson"] } },
+  { name:"start_group_mode", description:"Start a group conversation on speakerphone when the user introduces people ('Dan, meet Sam and Jo'). In group mode you only speak when addressed by your wake word.", parameters:{ type:"OBJECT", properties:{ people:{ type:"STRING", description:"names of people present, comma separated" } } } },
+  { name:"stop_group_mode", description:"End group mode and go back to one-to-one", parameters:{ type:"OBJECT", properties:{} } },
+  { name:"remember_person", description:"Remember someone you've been introduced to (name, role, useful non-sensitive notes)", parameters:{ type:"OBJECT", properties:{ name:{ type:"STRING" }, role:{ type:"STRING", description:"e.g. Line 2 team leader" }, notes:{ type:"STRING", description:"useful, non-sensitive context e.g. 'working on the new rota'" } }, required:["name"] } },
+  { name:"forget_person", description:"Forget a person completely when they ask", parameters:{ type:"OBJECT", properties:{ name:{ type:"STRING" } }, required:["name"] } },
   { name:"start_interpreter", description:"Start live interpreter mode: translate between English and another language out loud, both ways, so the user can talk to someone who speaks that language", parameters:{ type:"OBJECT", properties:{ language:{ type:"STRING", description:"e.g. Polish, Romanian, Punjabi, Urdu, Portuguese, Lithuanian, Bulgarian, Hungarian, Arabic, Spanish" } }, required:["language"] } },
   { name:"stop_interpreter", description:"Stop interpreter mode and go back to normal", parameters:{ type:"OBJECT", properties:{} } },
   { name:"open_meeting_recorder", description:"Open the meeting recorder (ends this call) so the user can record a meeting and get a transcript and Word minutes", parameters:{ type:"OBJECT", properties:{ title:{ type:"STRING" }, type:{ type:"STRING", description:"team brief, production, audit, supplier, training, voice note or general" }, people:{ type:"STRING" } } } },
@@ -858,6 +868,10 @@ function runTool(name, a){
     else if (name === "create_spreadsheet") applyActions({ spreadsheet:{ title:a.title, csv:a.csv } });
     else if (name === "create_presentation") applyActions({ presentation:{ title:a.title, slides:a.slides } });
     else if (name === "add_calendar_event") applyActions({ event:a });
+    else if (name === "start_group_mode") return startGroup(a.people || "");
+    else if (name === "stop_group_mode") return stopGroup();
+    else if (name === "remember_person") return rememberPerson(a);
+    else if (name === "forget_person") return forgetPerson(a);
     else if (name === "start_interpreter") return startInterpreter(a.language);
     else if (name === "stop_interpreter") return stopInterpreter();
     else if (name === "open_meeting_recorder") { setTimeout(() => openRecorder(a), 2500); return { result:"Opening the recorder in a moment – say a quick goodbye; the call will end." }; }
@@ -946,13 +960,17 @@ function connectLive(mi, isReconnect){
     const sc = m.serverContent;
     if (sc) {
       if (sc.interrupted) { stopPlayback(); setMode("listening"); setStatus("I'm listening…"); }
-      if (sc.inputTranscription && sc.inputTranscription.text) liveBubble("me", sc.inputTranscription.text);
-      if (sc.outputTranscription && sc.outputTranscription.text) liveBubble("dan", sc.outputTranscription.text);
-      ((sc.modelTurn && sc.modelTurn.parts) || []).forEach(p => { if (p.inlineData && /audio/.test(p.inlineData.mimeType || "audio")) playPCM(p.inlineData.data, p.inlineData.mimeType); });
-      if (sc.turnComplete) { commitBubble("me"); commitBubble("dan"); }
+      if (sc.inputTranscription && sc.inputTranscription.text) { liveBubble("me", sc.inputTranscription.text); L.turnIn = (L.turnIn || "") + " " + sc.inputTranscription.text; }
+      const hasOut = (sc.outputTranscription && sc.outputTranscription.text) || ((sc.modelTurn && sc.modelTurn.parts) || []).some(p => p.inlineData);
+      if (hasOut && L.group && L.gate === undefined) { L.gate = groupAllowed(); if (!L.gate) stopPlayback(); }
+      const muted = L.group && L.gate === false;
+      if (!muted && sc.outputTranscription && sc.outputTranscription.text) liveBubble("dan", sc.outputTranscription.text);
+      if (!muted) ((sc.modelTurn && sc.modelTurn.parts) || []).forEach(p => { if (p.inlineData && /audio/.test(p.inlineData.mimeType || "audio")) playPCM(p.inlineData.data, p.inlineData.mimeType); });
+      if (sc.turnComplete) { commitBubble("me"); commitBubble("dan"); if (L.group && L.gate) L.windowUntil = Date.now() + 12000; L.gate = undefined; L.turnIn = ""; }
     }
     if (m.toolCall && m.toolCall.functionCalls) {
-      Promise.all(m.toolCall.functionCalls.map(async fc => ({ id:fc.id, name:fc.name, response: await runTool(fc.name, fc.args) }))).then(functionResponses => { if (ws.readyState === 1) ws.send(JSON.stringify({ toolResponse:{ functionResponses } })); });
+      const blocked = L.group && !groupAllowed() && !m.toolCall.functionCalls.every(fc => /^(remember_person|stop_group_mode)$/.test(fc.name));
+      Promise.all(m.toolCall.functionCalls.map(async fc => blocked ? ({ id:fc.id, name:fc.name, response:{ error:"Nobody addressed you – stay silent." } }) : ({ id:fc.id, name:fc.name, response: await runTool(fc.name, fc.args) }))).then(functionResponses => { if (ws.readyState === 1) ws.send(JSON.stringify({ toolResponse:{ functionResponses } })); });
     }
     if (m.sessionResumptionUpdate && m.sessionResumptionUpdate.resumable !== false && m.sessionResumptionUpdate.newHandle) L.resumeHandle = m.sessionResumptionUpdate.newHandle;
     if (m.goAway && !L.swapping) {
@@ -1044,6 +1062,51 @@ function camOff(silent){
 }
 $("camBtn").onclick = () => { if (!live) return; cam ? camOff() : camOn("environment"); };
 $("flipBtn").onclick = () => { if (cam) camOn(cam.facing === "environment" ? "user" : "environment"); };
+
+/* ============================== Group mode & people ============================== */
+function wakeWords(){
+  const custom = (S.settings.wake || "").trim();
+  if (custom) return custom;
+  return /^dan/i.test(S.settings.name || "") ? "Dan two" : "Dan";
+}
+function wakeRegex(){
+  const w = wakeWords().toLowerCase().replace(/[^a-z0-9 .]/g, "").trim();
+  if (w === "dan two") return /\b(dan|danny|den)\s*(2|two|too|to)\b|dan\s*2\.0|dan two point/i;
+  if (w === "dan") return /\b(dan|danny|den)\b/i;
+  return new RegExp("\\b" + w.replace(/\s+/g, "\\s*") + "\\b", "i");
+}
+function groupAllowed(){ return !!L && (wakeRegex().test(L.turnIn || "") || Date.now() < (L.windowUntil || 0)); }
+function startGroup(people){
+  if (!live || !L) return { error:"Group mode works during a call." };
+  L.group = true; L.windowUntil = Date.now() + 30000; // let Dan finish introductions
+  $("groupBar").style.display = "block"; $("groupWake").textContent = wakeWords();
+  const known = (people || "").split(/,|\band\b/).map(x => x.trim()).filter(Boolean);
+  return { result:"Group mode ON", wake_word:wakeWords(), people_present:known, instructions:`You're now in a GROUP conversation on speakerphone with ${S.settings.name || "the user"}${known.length ? " and " + known.join(", ") : ""}. 1) Introduce yourself briefly and warmly: you're Dan 2.0, ${S.settings.name || "the user"}'s AI assistant; mention that what's said goes through Google's AI so nothing confidential please, and that they can ask you not to remember them. 2) Greet each new person by name and ask anyone you don't know their name and role. Use remember_person for each person (name, role, anything useful they share – never health, HR or other sensitive details). 3) From now on ONLY respond when someone says "${wakeWords()}" or asks you a direct follow-up right after you've spoken; otherwise stay completely silent. 4) Work out who is speaking from names and context; if unsure, ask "Sorry, who's that?". Address people by name. 5) Keep answers short and suitable for everyone in the room. 6) Stay in group mode until "${S.settings.name || "the user"}" says "end group mode" (call stop_group_mode).` };
+}
+function stopGroup(){ if (L) { L.group = false; } $("groupBar").style.display = "none"; return { result:"Group mode OFF – back to one-to-one with " + (S.settings.name || "the user") }; }
+function rememberPerson(a){
+  const n = (a.name || "").trim(); if (!n) return { error:"name needed" };
+  S.people = S.people || [];
+  let p = S.people.find(x => x.name.toLowerCase() === n.toLowerCase());
+  if (!p) { p = { id:uid(), name:n, role:"", notes:"", met:Date.now() }; S.people.push(p); }
+  if (a.role) p.role = a.role.trim();
+  if (a.notes) p.notes = (p.notes ? p.notes + "; " : "") + a.notes.trim();
+  if (p.notes.length > 500) p.notes = p.notes.slice(-500);
+  p.last = Date.now(); DB.set("people", S.people); renderPeople();
+  return { result:"remembered " + n };
+}
+function forgetPerson(a){ const n = (a.name || "").toLowerCase().trim(); const before = (S.people || []).length; S.people = (S.people || []).filter(p => p.name.toLowerCase() !== n); DB.set("people", S.people); renderPeople(); return { result: before !== S.people.length ? "Forgotten" : "Not found" }; }
+function renderPeople(){
+  const ul = $("peopleList"); if (!ul) return; ul.innerHTML = "";
+  if (!(S.people || []).length) ul.innerHTML = '<li><span class="t" style="color:var(--dim)">Nobody yet. On a call, say "Dan, meet Sam and Jo" to start a group chat.</span></li>';
+  (S.people || []).slice().sort((a, b) => (b.last || 0) - (a.last || 0)).forEach(p => {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="t">👤 ${esc(p.name)}${p.role ? " – " + esc(p.role) : ""}<small>${esc(p.notes || "")}${p.notes ? " · " : ""}met ${ukDate(p.met)}</small></span><button aria-label="Forget">✕</button>`;
+    li.children[1].onclick = () => { S.people = S.people.filter(x => x !== p); DB.set("people", S.people); renderPeople(); };
+    ul.appendChild(li);
+  });
+}
+$("groupStop").onclick = () => { stopGroup(); if (live && L && L.ready) { L.windowUntil = Date.now() + 15000; L.ws.send(JSON.stringify({ realtimeInput:{ text:"(End group mode now – say a quick goodbye to everyone and go back to one-to-one.)" } })); } };
 
 /* ============================== Live interpreter ============================== */
 function startInterpreter(lang){
@@ -1174,7 +1237,7 @@ ${transcript.slice(0, 120000)}`;
 $("recBtnDocs").onclick = () => openRecorder();
 
 function stopLive(){
-  $("interpBar").style.display = "none";
+  $("interpBar").style.display = "none"; $("groupBar").style.display = "none";
   camOff(); $("camBtn").disabled = true;
   live = false;
   document.body.classList.remove("live"); $("orbLbl").textContent = "DAN 2.0";
@@ -1474,7 +1537,7 @@ function fillVoices(){
 }
 function fillSettings(){
   $("sName").value = S.settings.name || ""; $("sKey").value = S.settings.key || ""; $("sEmail").value = S.settings.email || ""; $("calInfo").textContent = S.calendar ? "Last synced " + new Date(S.calendar.at).toLocaleString("en-GB", { timeZone:"Europe/London", weekday:"short", day:"numeric", month:"short", hour:"2-digit", minute:"2-digit" }) + "." : "Not synced yet."; $("sPersona").value = S.settings.persona || ""; $("sLoc").checked = S.settings.location !== false; $("sNotes").checked = S.settings.autoNotes !== false;
-  $("sModel").value = S.settings.model; $("sAccent").innerHTML = Object.keys(ACCENTS).map(a => `<option>${a}</option>`).join(""); $("sAccent").value = S.settings.accent || "British (standard / RP)"; $("sLiveVoice").innerHTML = LIVE_VOICES.map(v => `<option>${v}</option>`).join(""); $("sLiveVoice").value = S.settings.liveVoice || "Charon"; $("sRate").value = S.settings.rate; fillVoices();
+  $("sModel").value = S.settings.model; $("sAccent").innerHTML = Object.keys(ACCENTS).map(a => `<option>${a}</option>`).join(""); $("sAccent").value = S.settings.accent || "British (standard / RP)"; $("sWake").value = S.settings.wake || ""; $("sWake").placeholder = wakeWords(); $("sLiveVoice").innerHTML = LIVE_VOICES.map(v => `<option>${v}</option>`).join(""); $("sLiveVoice").value = S.settings.liveVoice || "Charon"; $("sRate").value = S.settings.rate; fillVoices();
   $("about").textContent = `Dan 2.0 · ${S.memories.length} memories · ${S.tasks.filter(t => !t.done).length} open tasks · ${S.docs.length} files. Everything is stored on this phone only.`;
 }
 
@@ -1495,10 +1558,10 @@ $("memAdd").onclick = () => { const v = $("memIn").value.trim(); if (!v) return;
 $("fileBtn").onclick = () => $("fileIn").click();
 $("fileIn").onchange = (e) => { handleFiles([...e.target.files]); e.target.value = ""; };
 $("pasteAdd").onclick = async () => { const n = $("pasteName").value.trim() || "Pasted note " + ukDate(Date.now()); const t = $("pasteText").value; try { await addDoc(n, t); $("pasteName").value = ""; $("pasteText").value = ""; $("fileErr").textContent = "Saved " + n; } catch (e) { $("fileErr").textContent = e.message; } };
-$("sSave").onclick = () => { S.settings.accent = $("sAccent").value; S.settings.name = $("sName").value.trim(); S.settings.email = $("sEmail").value.trim(); S.settings.persona = $("sPersona").value.trim(); S.settings.autoNotes = $("sNotes").checked; S.settings.location = $("sLoc").checked; if (S.settings.location) refreshLocation(8000); S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); tickClock(); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
+$("sSave").onclick = () => { S.settings.accent = $("sAccent").value; S.settings.wake = $("sWake").value.trim(); S.settings.name = $("sName").value.trim(); S.settings.email = $("sEmail").value.trim(); S.settings.persona = $("sPersona").value.trim(); S.settings.autoNotes = $("sNotes").checked; S.settings.location = $("sLoc").checked; if (S.settings.location) refreshLocation(8000); S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); tickClock(); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
 $("sTest").onclick = () => { S.settings.voice = $("sVoice").value; S.settings.rate = Number($("sRate").value); try { synth.cancel(); } catch (e) {} speak("Dan 2.0, at your service."); };
 $("bExport").onclick = () => {
-  const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs.map(d => ({ ...d, vecs:undefined })), written:S.written, followups:S.followups, profile:S.profile, lessons:S.lessons, study:S.study, otj:S.otj, care:S.care, dates:S.dates });
+  const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs.map(d => ({ ...d, vecs:undefined })), written:S.written, followups:S.followups, profile:S.profile, lessons:S.lessons, study:S.study, otj:S.otj, care:S.care, dates:S.dates, people:S.people });
   const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], { type:"application/json" }));
   a.download = "dan2-backup-" + new Date().toISOString().slice(0, 10) + ".json"; document.body.appendChild(a); a.click(); a.remove();
 };
@@ -1507,7 +1570,7 @@ $("bFile").onchange = async (e) => {
   const f = e.target.files[0]; if (!f) return;
   try {
     const d = JSON.parse(await f.text()); if (d.app !== "dan2") throw new Error("Not a Dan 2.0 backup");
-    S.memories = d.memories || []; S.tasks = d.tasks || []; S.history = d.history || []; S.docs = d.docs || []; S.written = d.written || []; S.followups = d.followups || []; S.profile = d.profile || ""; DB.set("profile", S.profile); S.lessons = d.lessons || []; DB.set("lessons", S.lessons); S.study = d.study || S.study; DB.set("study", S.study); S.otj = d.otj || S.otj || []; DB.set("otj", S.otj); S.care = d.care || []; DB.set("care", S.care); S.dates = d.dates || []; DB.set("dates", S.dates);
+    S.memories = d.memories || []; S.tasks = d.tasks || []; S.history = d.history || []; S.docs = d.docs || []; S.written = d.written || []; S.followups = d.followups || []; S.profile = d.profile || ""; DB.set("profile", S.profile); S.lessons = d.lessons || []; DB.set("lessons", S.lessons); S.study = d.study || S.study; DB.set("study", S.study); S.otj = d.otj || S.otj || []; DB.set("otj", S.otj); S.care = d.care || []; DB.set("care", S.care); S.dates = d.dates || []; DB.set("dates", S.dates); S.people = d.people || []; DB.set("people", S.people);
     S.settings = { ...S.settings, ...(d.settings || {}), key:S.settings.key };
     await Promise.all(["memories","tasks","history","docs","written","followups","settings"].map(save));
     renderAll(); fillSettings(); $("about").textContent = "Backup restored ✓";
@@ -2055,7 +2118,7 @@ async function healthCheck(){
 }
 $("hcRun").onclick = healthCheck;
 
-function renderAll(){ renderHistory(); renderTasks(); renderMem(); renderDocs(); renderWritten(); renderFollowups(); renderLessons(); renderStudy(); renderOtj(); renderCare(); }
+function renderAll(){ renderHistory(); renderTasks(); renderMem(); renderDocs(); renderWritten(); renderFollowups(); renderLessons(); renderStudy(); renderOtj(); renderCare(); renderPeople(); }
 function netStatus(){ $("net").textContent = navigator.onLine ? "● online" : "○ offline"; $("net").style.color = navigator.onLine ? "var(--green)" : "var(--red)"; }
 window.addEventListener("online", netStatus); window.addEventListener("offline", netStatus);
 document.addEventListener("visibilitychange", () => { if (document.hidden && live) stopLive(); });
