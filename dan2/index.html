@@ -269,6 +269,7 @@ li.done .chk{background:var(--cyan2)}
     <h2>Settings</h2>
     <div class="field"><label>Your name</label><input id="sName"></div>
     <div class="field"><label>Your email (for notes and documents)</label><input id="sEmail" type="email" autocapitalize="off" spellcheck="false" placeholder="you@example.com"></div>
+    <div class="field"><label><input type="checkbox" id="sClose" style="width:auto;margin-right:8px">Only respond to my voice – ignore quieter voices further from the phone (works best with AirPods)</label></div>
     <div class="field"><label><input type="checkbox" id="sLoc" style="width:auto;margin-right:8px">Share my location with Dan (for travel, nearby places, weather)</label></div>
     <div class="field"><label><input type="checkbox" id="sNotes" style="width:auto;margin-right:8px">Save notes after every call</label></div>
     <div class="field"><label>Gemini API key</label><input id="sKey" autocapitalize="off" spellcheck="false"></div>
@@ -782,6 +783,8 @@ function livePrompt(){
   const recent = S.history.slice(-14).map(h => (h.role === "dan" ? "Dan: " : "Me: ") + h.text).join("\n");
   return `INTERNET – TOP PRIORITY: You DO have live internet access. For anything current or that you’re not certain of (news, weather, sport, prices, opening times, travel, events, law changes, people in the news, "today"/"latest"/"now" questions) you MUST call web_search (or get_weather for weather) before answering. Never say you can’t browse, can’t access the internet or don’t have real-time information. If a search genuinely fails, say "I couldn’t get that just now" and offer to try again.
 
+ONE-TO-ONE BY DEFAULT – TOP PRIORITY: unless group mode is on, you are talking ONLY with ${S.settings.name || "the user"}. Learn ${S.settings.name || "the user"}'s voice from the start of the call. If you hear any other voice (colleagues, people nearby, TV, radio, tannoy, background chat) or speech that isn't directed at you, stay completely silent: don't answer, don't comment, don't call tools. Only respond to ${S.settings.name || "the user"}'s own voice. If another person speaks to you directly, don't engage – at most say once, briefly, "Sorry, I only chat with ${S.settings.name || "the user"} unless he starts a group chat." Group conversations happen ONLY when ${S.settings.name || "the user"} explicitly starts one.
+
 VOICE AND ACCENT – TOP PRIORITY: You always speak English with ${accentLine()}. Never slip into an American accent (the only exception: in interpreter mode, speak the other language with its native accent)${/American/.test(S.settings.accent || "") ? " (ignore this line: American is requested)" : ""}. Use British vocabulary and spellings in speech ("mobile", "rota", "holiday", "car park", "queue", "brilliant", "cheers"), British pronunciation ("schedule" as SHED-yool, "tomato" as to-MAH-to, "garage" as GA-ridge, "aluminium"), and say dates the British way ("the twenty-ninth of October").
 
 ` + head + `This is a live voice call. Speak in that accent with a warm, relaxed tone, with natural rhythm, pauses and the odd "mm" or "right" like a real person. Sound like a mate who happens to be brilliant, not a butler or a robot. Keep it conversational; ${S.settings.name || "the user"} can interrupt you at any time, so stop and listen when they do. Brief acknowledgements like "mm-hm" or "go on" are fine when they're mid-thought.
@@ -936,6 +939,7 @@ function connectLive(mi, isReconnect){
   const model = models[mi]; L.ready = false; L.mi = mi;
   const ws = new WebSocket("wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + encodeURIComponent(S.settings.key));
   L.ws = ws;
+  { const raw = ws.send.bind(ws); ws.send = (d) => { if (typeof d === "string" && d.indexOf('"realtimeInput":{"text"') >= 0 && L) L.allowTurn = true; raw(d); }; }
   ws.onopen = () => {
     ws.send(JSON.stringify({ setup:{
       model:"models/" + model,
@@ -944,7 +948,8 @@ function connectLive(mi, isReconnect){
       tools: L.noSearch ? LIVE_TOOLS : [{ googleSearch:{} }, ...LIVE_TOOLS],
       sessionResumption: L.resumeHandle ? { handle:L.resumeHandle } : {},
       inputAudioTranscription:{}, outputAudioTranscription:{},
-      contextWindowCompression:{ slidingWindow:{} }
+      contextWindowCompression:{ slidingWindow:{} },
+      ...(L.noProactive ? {} : { proactivity:{ proactiveAudio:true } })
     }}));
   };
   ws.onmessage = async (ev) => {
@@ -959,17 +964,18 @@ function connectLive(mi, isReconnect){
     }
     const sc = m.serverContent;
     if (sc) {
+      if (sc.interrupted) { L.gate = undefined; }
       if (sc.interrupted) { stopPlayback(); setMode("listening"); setStatus("I'm listening…"); }
       if (sc.inputTranscription && sc.inputTranscription.text) { liveBubble("me", sc.inputTranscription.text); L.turnIn = (L.turnIn || "") + " " + sc.inputTranscription.text; }
       const hasOut = (sc.outputTranscription && sc.outputTranscription.text) || ((sc.modelTurn && sc.modelTurn.parts) || []).some(p => p.inlineData);
-      if (hasOut && L.group && L.gate === undefined) { L.gate = groupAllowed(); if (!L.gate) stopPlayback(); }
-      const muted = L.group && L.gate === false;
+      if (hasOut && L.gate === undefined) { L.gate = L.group ? groupAllowed() : soloAllowed(); if (!L.gate) { stopPlayback(); setStatus("I'm listening…"); } }
+      const muted = L.gate === false;
       if (!muted && sc.outputTranscription && sc.outputTranscription.text) liveBubble("dan", sc.outputTranscription.text);
       if (!muted) ((sc.modelTurn && sc.modelTurn.parts) || []).forEach(p => { if (p.inlineData && /audio/.test(p.inlineData.mimeType || "audio")) playPCM(p.inlineData.data, p.inlineData.mimeType); });
-      if (sc.turnComplete) { commitBubble("me"); commitBubble("dan"); if (L.group && L.gate) L.windowUntil = Date.now() + 12000; L.gate = undefined; L.turnIn = ""; }
+      if (sc.turnComplete) { commitBubble("me"); commitBubble("dan"); if (L.group && L.gate) L.windowUntil = Date.now() + 12000; if (!L.group && L.gate && !L.allowTurn && (L.turnPeak || 0) > 0.012) L.ownerLevel = L.ownerLevel ? L.ownerLevel * 0.8 + L.turnPeak * 0.2 : L.turnPeak; L.gate = undefined; L.turnIn = ""; L.turnPeak = 0; L.allowTurn = false; }
     }
     if (m.toolCall && m.toolCall.functionCalls) {
-      const blocked = L.group && !groupAllowed() && !m.toolCall.functionCalls.every(fc => /^(remember_person|stop_group_mode)$/.test(fc.name));
+      const blocked = ((L.group && !groupAllowed()) || (!L.group && !soloAllowed())) && !m.toolCall.functionCalls.every(fc => /^(remember_person|stop_group_mode)$/.test(fc.name));
       Promise.all(m.toolCall.functionCalls.map(async fc => blocked ? ({ id:fc.id, name:fc.name, response:{ error:"Nobody addressed you – stay silent." } }) : ({ id:fc.id, name:fc.name, response: await runTool(fc.name, fc.args) }))).then(functionResponses => { if (ws.readyState === 1) ws.send(JSON.stringify({ toolResponse:{ functionResponses } })); });
     }
     if (m.sessionResumptionUpdate && m.sessionResumptionUpdate.resumable !== false && m.sessionResumptionUpdate.newHandle) L.resumeHandle = m.sessionResumptionUpdate.newHandle;
@@ -982,6 +988,7 @@ function connectLive(mi, isReconnect){
   ws.onerror = () => {};
   ws.onclose = (ev) => {
     if (!L || L.ws !== ws || !live) return;
+    if (!L.ready && !L.noProactive && /proactiv/i.test(ev.reason || "")) { L.noProactive = true; S.settings.liveNoProactive = true; connectLive(mi, isReconnect); return; }
     if (!L.ready && !L.noLang && /language/i.test(ev.reason || "")) { L.noLang = true; S.settings.liveNoLang = true; connectLive(mi, isReconnect); return; }
     if (!L.ready && L.resumeHandle) { L.resumeHandle = null; connectLive(mi, isReconnect); return; } // handle expired → fresh session
     if (!L.ready) { L.lastErr = ev.reason || ("connection closed (" + ev.code + ")"); if (/api key|auth|permission denied/i.test(ev.reason || "")) { addLog("sys", "Google refused your key: " + ev.reason); stopLive(); return; } if (!L.noSearch && !/not found|unknown model/i.test(ev.reason || "")) { L.noSearch = true; if (!S.flags_searchNote) { S.flags_searchNote = 1; addLog("sys", "Using Dan’s backup web search (built-in call search isn’t available on your key)."); } connectLive(mi, isReconnect); return; } L.noSearch = false; connectLive(mi + 1, isReconnect); return; }
@@ -996,7 +1003,7 @@ async function startLive(){
   if (live) return;
   live = true; document.body.classList.add("live"); $("orbLbl").textContent = "END";
   setMode("thinking"); setStatus("Connecting…");
-  L = { sources:new Set(), playTime:0, meT:"", danT:"", meB:null, danB:null, histStart:S.history.length, started:Date.now(), noSearch:!!S.settings.liveNoSearch, noLang:!!S.settings.liveNoLang };
+  L = { sources:new Set(), playTime:0, meT:"", danT:"", meB:null, danB:null, histStart:S.history.length, started:Date.now(), noSearch:!!S.settings.liveNoSearch, noLang:!!S.settings.liveNoLang, noProactive:!!S.settings.liveNoProactive };
   const locP = (S.settings.location !== false) ? refreshLocation(5000) : null;
   try { if (navigator.audioSession) navigator.audioSession.type = "play-and-record"; } catch (e) {}
   try {
@@ -1011,7 +1018,7 @@ async function startLive(){
   const code = `class P extends AudioWorkletProcessor{constructor(){super();this.r=sampleRate/16000;this.pos=0;this.buf=new Int16Array(1600);this.n=0;}
   process(inp){const x=inp[0]&&inp[0][0];if(!x)return true;let p=this.pos;while(p<x.length){const s=Math.max(-1,Math.min(1,x[p|0]));this.buf[this.n++]=s<0?s*32768:s*32767;if(this.n===this.buf.length){this.port.postMessage(this.buf.slice(0));this.n=0;}p+=this.r;}this.pos=p-x.length;return true;}}
   registerProcessor('pcm16',P);`;
-  const sendPCM = (i16) => { if (L && L.ready && L.ws && L.ws.readyState === 1) L.ws.send(JSON.stringify({ realtimeInput:{ audio:{ data:b64FromInt16(i16), mimeType:"audio/pcm;rate=16000" } } })); };
+  const sendPCM = (i16) => { if (L) { let q = 0; for (let k = 0; k < i16.length; k += 4) q += i16[k] * i16[k]; const rms = Math.sqrt(q / (i16.length / 4)) / 32768; if (rms > (L.turnPeak || 0)) L.turnPeak = rms; } if (L && L.ready && L.ws && L.ws.readyState === 1) L.ws.send(JSON.stringify({ realtimeInput:{ audio:{ data:b64FromInt16(i16), mimeType:"audio/pcm;rate=16000" } } })); };
   L.src = L.ctx.createMediaStreamSource(L.stream);
   L.anIn = L.ctx.createAnalyser(); L.anIn.fftSize = 512; L.src.connect(L.anIn);
   L.out = L.ctx.createGain(); L.anOut = L.ctx.createAnalyser(); L.anOut.fftSize = 512; L.out.connect(L.anOut); L.out.connect(L.ctx.destination);
@@ -1074,6 +1081,13 @@ function wakeRegex(){
   if (w === "dan two") return /\b(dan|danny|den)\s*(2|two|too|to)\b|dan\s*2\.0|dan two point/i;
   if (w === "dan") return /\b(dan|danny|den)\b/i;
   return new RegExp("\\b" + w.replace(/\s+/g, "\\s*") + "\\b", "i");
+}
+function soloAllowed(){
+  if (!L) return false;
+  if (L.allowTurn) return true;                          // turns we started (greetings, typed text, buttons)
+  if (S.settings.closeOnly === false) return true;
+  if (!L.ownerLevel) return true;                        // still learning how loud the user is
+  return (L.turnPeak || 0) >= L.ownerLevel * 0.4;        // much quieter = someone further away
 }
 function groupAllowed(){ return !!L && (wakeRegex().test(L.turnIn || "") || Date.now() < (L.windowUntil || 0)); }
 function startGroup(people){
@@ -1536,7 +1550,7 @@ function fillVoices(){
   if (cur) sel.value = cur.voiceURI;
 }
 function fillSettings(){
-  $("sName").value = S.settings.name || ""; $("sKey").value = S.settings.key || ""; $("sEmail").value = S.settings.email || ""; $("calInfo").textContent = S.calendar ? "Last synced " + new Date(S.calendar.at).toLocaleString("en-GB", { timeZone:"Europe/London", weekday:"short", day:"numeric", month:"short", hour:"2-digit", minute:"2-digit" }) + "." : "Not synced yet."; $("sPersona").value = S.settings.persona || ""; $("sLoc").checked = S.settings.location !== false; $("sNotes").checked = S.settings.autoNotes !== false;
+  $("sName").value = S.settings.name || ""; $("sKey").value = S.settings.key || ""; $("sEmail").value = S.settings.email || ""; $("calInfo").textContent = S.calendar ? "Last synced " + new Date(S.calendar.at).toLocaleString("en-GB", { timeZone:"Europe/London", weekday:"short", day:"numeric", month:"short", hour:"2-digit", minute:"2-digit" }) + "." : "Not synced yet."; $("sPersona").value = S.settings.persona || ""; $("sClose").checked = S.settings.closeOnly !== false; $("sLoc").checked = S.settings.location !== false; $("sNotes").checked = S.settings.autoNotes !== false;
   $("sModel").value = S.settings.model; $("sAccent").innerHTML = Object.keys(ACCENTS).map(a => `<option>${a}</option>`).join(""); $("sAccent").value = S.settings.accent || "British (standard / RP)"; $("sWake").value = S.settings.wake || ""; $("sWake").placeholder = wakeWords(); $("sLiveVoice").innerHTML = LIVE_VOICES.map(v => `<option>${v}</option>`).join(""); $("sLiveVoice").value = S.settings.liveVoice || "Charon"; $("sRate").value = S.settings.rate; fillVoices();
   $("about").textContent = `Dan 2.0 · ${S.memories.length} memories · ${S.tasks.filter(t => !t.done).length} open tasks · ${S.docs.length} files. Everything is stored on this phone only.`;
 }
@@ -1558,7 +1572,7 @@ $("memAdd").onclick = () => { const v = $("memIn").value.trim(); if (!v) return;
 $("fileBtn").onclick = () => $("fileIn").click();
 $("fileIn").onchange = (e) => { handleFiles([...e.target.files]); e.target.value = ""; };
 $("pasteAdd").onclick = async () => { const n = $("pasteName").value.trim() || "Pasted note " + ukDate(Date.now()); const t = $("pasteText").value; try { await addDoc(n, t); $("pasteName").value = ""; $("pasteText").value = ""; $("fileErr").textContent = "Saved " + n; } catch (e) { $("fileErr").textContent = e.message; } };
-$("sSave").onclick = () => { S.settings.accent = $("sAccent").value; S.settings.wake = $("sWake").value.trim(); S.settings.name = $("sName").value.trim(); S.settings.email = $("sEmail").value.trim(); S.settings.persona = $("sPersona").value.trim(); S.settings.autoNotes = $("sNotes").checked; S.settings.location = $("sLoc").checked; if (S.settings.location) refreshLocation(8000); S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); tickClock(); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
+$("sSave").onclick = () => { S.settings.accent = $("sAccent").value; S.settings.wake = $("sWake").value.trim(); S.settings.name = $("sName").value.trim(); S.settings.email = $("sEmail").value.trim(); S.settings.persona = $("sPersona").value.trim(); S.settings.autoNotes = $("sNotes").checked; S.settings.location = $("sLoc").checked; S.settings.closeOnly = $("sClose").checked; if (S.settings.location) refreshLocation(8000); S.settings.key = $("sKey").value.trim(); S.settings.model = $("sModel").value.trim() || "gemini-flash-latest"; S.settings.voice = $("sVoice").value; S.settings.liveVoice = $("sLiveVoice").value; S.settings.rate = Number($("sRate").value); save("settings"); tickClock(); $("sSave").textContent = "Saved ✓"; setTimeout(() => $("sSave").textContent = "Save", 1500); };
 $("sTest").onclick = () => { S.settings.voice = $("sVoice").value; S.settings.rate = Number($("sRate").value); try { synth.cancel(); } catch (e) {} speak("Dan 2.0, at your service."); };
 $("bExport").onclick = () => {
   const data = JSON.stringify({ app:"dan2", v:1, exported:new Date().toISOString(), settings:{ ...S.settings, key:undefined }, memories:S.memories, tasks:S.tasks, history:S.history, docs:S.docs.map(d => ({ ...d, vecs:undefined })), written:S.written, followups:S.followups, profile:S.profile, lessons:S.lessons, study:S.study, otj:S.otj, care:S.care, dates:S.dates, people:S.people });
